@@ -1,0 +1,89 @@
+name: CI
+
+on:
+  push:
+    branches:
+      main
+
+jobs:
+  ci-infra-repo:
+    runs-on: ubuntu-latest
+
+    name: Deploy latest commit to infra
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Login to GitHub Container Registry
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Setup go
+        uses: actions/setup-go@v4
+        with:
+          go-version: 'stable'
+          check-latest: true
+          cache: true
+      
+      - name: Setup private repos for go modules
+        env:
+          SSH_AUTH_SOCK: /tmp/ssh_agent.sock
+        run: |
+          mkdir -p ~/.ssh
+          ssh-keyscan github.com >> ~/.ssh/known_hosts
+          ssh-agent -a $SSH_AUTH_SOCK > /dev/null
+          ssh-add - <<< "${{ secrets.GO_MODULE_PRIVATE_KEY }}"
+          echo "SSH_AUTH_SOCK=$SSH_AUTH_SOCK" >> $GITHUB_ENV
+          git config --global url."ssh://git@github.com/".insteadOf https://github.com/
+      
+      - name: Build
+        env:
+          GOPRIVATE: github.com/kedify
+          CGO_ENABLED: 0
+        run: go build -o recommender ./main.go
+
+      - name: Build and push image
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          file: Dockerfile.goreleaser
+          push: true
+          tags: ghcr.io/kedify/kedify-recommender:${{ github.sha }}
+
+      - name: Commit to infra repo
+        env:
+          SSH_AUTH_SOCK: /tmp/ssh_agent.sock
+        run: |
+          set -euo pipefail
+
+          echo "configure ssh agent" 
+          ssh-add -D
+          ssh-add - <<< "${{ secrets.INFRA_REPO_KEY }}"
+
+          echo "git config setup"
+          git config --global user.email kedifybot@kedify.io
+          git config --global user.name "Kedify Bot"
+
+          echo "cloning infra repo"
+          git clone --branch=main https://github.com/kedify/infra
+          cd infra
+
+          echo "create deployment commit"
+          sed -i "s|\(image: ghcr.io/kedify/kedify-recommender:\).*|\1${{ github.sha }}|" apps/kedify_recommender/deployment.yaml
+
+          git add apps/kedify_recommender/deployment.yaml
+          if [[ -z "$(git diff --cached)" ]]; then
+            echo "no update"
+            exit 0
+          fi
+          
+          echo "commit in infra repo"
+          git commit -m "kedify-recommender CI commit ${{ github.sha }}"
+          
+          echo "push"
+          git push origin main
