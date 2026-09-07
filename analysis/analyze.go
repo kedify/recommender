@@ -145,24 +145,32 @@ func Analyze(input Input, policy Policy) (Output, error) {
 		EffectivePolicy: effectivePolicy,
 		Results:         make([]ResourceAnalysis, 0, len(input.Containers)*2),
 	}
-	containers := append([]ContainerObservation(nil), input.Containers...)
+	type indexedContainer struct {
+		originalIndex int
+		observation   ContainerObservation
+	}
+	containers := make([]indexedContainer, len(input.Containers))
+	for i, container := range input.Containers {
+		containers[i] = indexedContainer{originalIndex: i, observation: container}
+	}
 	sort.SliceStable(containers, func(i, j int) bool {
-		return targetLess(containers[i].Target, containers[j].Target)
+		return targetLess(containers[i].observation.Target, containers[j].observation.Target)
 	})
-	for i, container := range containers {
-		if i > 0 && container.Target == containers[i-1].Target {
-			return Output{}, fmt.Errorf("containers[%d]: duplicate target", i)
+	for i, indexed := range containers {
+		container := indexed.observation
+		if i > 0 && container.Target == containers[i-1].observation.Target {
+			return Output{}, fmt.Errorf("containers[%d]: duplicate target", indexed.originalIndex)
 		}
 		if err := validateObservation(container); err != nil {
-			return Output{}, fmt.Errorf("containers[%d]: %w", i, err)
+			return Output{}, fmt.Errorf("containers[%d]: %w", indexed.originalIndex, err)
 		}
 		memory, err := analyzeResource(container.Target, ResourceMemory, container.Memory, input.ObservedIntervalHours, effectivePolicy.Memory.HeadroomCoefficient, effectivePolicy.Memory.LimitsToRequestsRatio, minimumMemoryBytes, minimumMemoryAbsChange)
 		if err != nil {
-			return Output{}, fmt.Errorf("containers[%d]: %w", i, err)
+			return Output{}, fmt.Errorf("containers[%d]: %w", indexed.originalIndex, err)
 		}
 		cpu, err := analyzeResource(container.Target, ResourceCPU, container.CPU, input.ObservedIntervalHours, effectivePolicy.CPU.HeadroomCoefficient, effectivePolicy.CPU.LimitsToRequestsRatio, minimumCPUMillicores, minimumCPUAbsoluteChange)
 		if err != nil {
-			return Output{}, fmt.Errorf("containers[%d]: %w", i, err)
+			return Output{}, fmt.Errorf("containers[%d]: %w", indexed.originalIndex, err)
 		}
 		output.Results = append(output.Results, memory, cpu)
 	}

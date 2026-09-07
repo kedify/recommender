@@ -401,6 +401,25 @@ func TestAnalyzeRejectsArithmeticOverflow(t *testing.T) {
 	}
 }
 
+func TestAnalyzeErrorsUseOriginalContainerIndex(t *testing.T) {
+	input := Input{
+		SchemaVersion:         InputSchemaVersion,
+		ObservedIntervalHours: 1,
+		Containers: []ContainerObservation{
+			{
+				Target: Target{Namespace: "z-last", Kind: "Deployment", Name: "api"},
+			},
+			missingObservation("valid"),
+		},
+	}
+
+	_, err := Analyze(input, Policy{})
+	want := "containers[0]: target namespace, kind, name, and container are required"
+	if err == nil || err.Error() != want {
+		t.Fatalf("Analyze() error = %v, want %q", err, want)
+	}
+}
+
 func TestRejectsInvalidInputAndPolicy(t *testing.T) {
 	valid := Input{SchemaVersion: InputSchemaVersion, ObservedIntervalHours: 1}
 
