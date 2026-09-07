@@ -5,7 +5,11 @@ on:
     branches: [main]
 
 permissions:
+  actions: read
+  checks: write
   contents: read
+  pull-requests: read
+  security-events: write
 
 jobs:
   build-and-test:
