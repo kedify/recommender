@@ -67,6 +67,7 @@ func TestAnalyzerExecutable(t *testing.T) {
 		{name: "missing schema", input: `{"protocolVersion":"kedify-analyzer/v1"}`, stderr: `unsupported input schema version ""`},
 		{name: "incompatible schema", input: `{"protocolVersion":"kedify-analyzer/v1","input":{"schemaVersion":"resource-analysis-input/v2"}}`, stderr: `unsupported input schema version "resource-analysis-input/v2"`},
 		{name: "invalid analysis input", input: `{"protocolVersion":"kedify-analyzer/v1","input":{"schemaVersion":"resource-analysis-input/v1"}}`, stderr: `observedIntervalHours must be greater than 0`},
+		{name: "invalid policy", input: `{"protocolVersion":"kedify-analyzer/v1","input":{"schemaVersion":"resource-analysis-input/v1","observedIntervalHours":1},"policy":{"cpu":{"headroomCoefficient":-1}}}`, stderr: `cpu.headroomCoefficient must be greater than 0`},
 		{name: "unknown field", input: `{"protocolVersion":"kedify-analyzer/v1","unexpected":true}`, stderr: `unknown field "unexpected"`},
 		{name: "malformed JSON", input: `{"protocolVersion":`, stderr: `invalid request`},
 	}

@@ -43,11 +43,11 @@ func main() {
 func run(stdin io.Reader, stdout, stderr io.Writer) int {
 	requestBytes, err := io.ReadAll(io.LimitReader(stdin, maxRequestBytes+1))
 	if err != nil {
-		fmt.Fprintf(stderr, "kedify-analyzer: unable to read request: %v\n", err)
+		writeDiagnostic(stderr, "unable to read request: %v", err)
 		return exitInvalid
 	}
 	if len(requestBytes) > maxRequestBytes {
-		fmt.Fprintf(stderr, "kedify-analyzer: request exceeds %d-byte limit\n", maxRequestBytes)
+		writeDiagnostic(stderr, "request exceeds %d-byte limit", maxRequestBytes)
 		return exitInvalid
 	}
 
@@ -56,21 +56,21 @@ func run(stdin io.Reader, stdout, stderr io.Writer) int {
 
 	var req request
 	if err := decoder.Decode(&req); err != nil {
-		fmt.Fprintf(stderr, "kedify-analyzer: invalid request: %v\n", err)
+		writeDiagnostic(stderr, "invalid request: %v", err)
 		return exitInvalid
 	}
 	if err := decoder.Decode(&struct{}{}); err != io.EOF {
-		fmt.Fprintln(stderr, "kedify-analyzer: invalid request: expected one JSON object")
+		writeDiagnostic(stderr, "invalid request: expected one JSON object")
 		return exitInvalid
 	}
 	if req.ProtocolVersion != protocolVersion {
-		fmt.Fprintf(stderr, "kedify-analyzer: unsupported protocolVersion %q; expected %q\n", req.ProtocolVersion, protocolVersion)
+		writeDiagnostic(stderr, "unsupported protocolVersion %q; expected %q", req.ProtocolVersion, protocolVersion)
 		return exitInvalid
 	}
 
 	output, err := analysis.Analyze(req.Input, req.Policy)
 	if err != nil {
-		fmt.Fprintf(stderr, "kedify-analyzer: analysis failed: %v\n", err)
+		writeDiagnostic(stderr, "analysis failed: %v", err)
 		return exitInvalid
 	}
 
@@ -83,8 +83,12 @@ func run(stdin io.Reader, stdout, stderr io.Writer) int {
 		Output:              output,
 	}
 	if err := json.NewEncoder(stdout).Encode(result); err != nil {
-		fmt.Fprintf(stderr, "kedify-analyzer: unable to write response: %v\n", err)
+		writeDiagnostic(stderr, "unable to write response: %v", err)
 		return exitInternal
 	}
 	return exitSuccess
+}
+
+func writeDiagnostic(stderr io.Writer, format string, args ...any) {
+	_, _ = fmt.Fprintf(stderr, "kedify-analyzer: "+format+"\n", args...)
 }
