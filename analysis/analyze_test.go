@@ -2,6 +2,7 @@ package analysis
 
 import (
 	"encoding/json"
+	"math"
 	"os"
 	"reflect"
 	"testing"
@@ -61,6 +62,39 @@ func TestGoldenDefaultPolicy(t *testing.T) {
 	if !reflect.DeepEqual(got, want) {
 		gotJSON, _ := json.MarshalIndent(got, "", "  ")
 		t.Fatalf("golden output mismatch\ngot:\n%s", gotJSON)
+	}
+}
+
+func TestPolicyVersionMatchesDashboardIdentity(t *testing.T) {
+	tests := []struct {
+		name   string
+		policy Policy
+		want   string
+	}{
+		{
+			name: "defaults",
+			want: "cpu=p95,h=3,r=5;mem=max,h=1.2,r=3",
+		},
+		{
+			name: "custom max",
+			policy: Policy{
+				CPU:    CPUPolicy{Strategy: CPUStrategyMax, HeadroomCoefficient: 2.5, LimitsToRequestsRatio: 4},
+				Memory: MemoryPolicy{Strategy: MemoryStrategyMax, HeadroomCoefficient: 1.4, LimitsToRequestsRatio: 2},
+			},
+			want: "cpu=max,h=2.5,r=4;mem=max,h=1.4,r=2",
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			got, err := PolicyVersion(test.policy)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got != test.want {
+				t.Fatalf("PolicyVersion() = %q, want %q", got, test.want)
+			}
+		})
 	}
 }
 
@@ -128,17 +162,43 @@ func TestMinimumValues(t *testing.T) {
 }
 
 func TestChangeThresholdsMatchCurrentDetector(t *testing.T) {
-	if isMaterialChange(100, 109, 8) {
-		t.Fatal("a change below ten percent must be ignored")
+	fixture, err := os.ReadFile("testdata/legacy-boundaries.json")
+	if err != nil {
+		t.Fatal(err)
 	}
-	if !isMaterialChange(100, 111, minimumMemoryAbsChange) {
-		t.Fatal("the current detector's literal memory threshold of 8 must be preserved")
+	var tests []struct {
+		Name                  string  `json:"name"`
+		Current               float64 `json:"current"`
+		Suggested             float64 `json:"suggested"`
+		MinimumAbsoluteChange float64 `json:"minimumAbsoluteChange"`
+		Want                  bool    `json:"recommend"`
 	}
-	if isMaterialChange(100, 140, minimumCPUAbsoluteChange) {
-		t.Fatal("a CPU change below 50 millicores must be ignored")
+	if err := json.Unmarshal(fixture, &tests); err != nil {
+		t.Fatal(err)
 	}
-	if !isMaterialChange(100, 150, minimumCPUAbsoluteChange) {
-		t.Fatal("a CPU change of 50 millicores must be included")
+	for _, test := range tests {
+		t.Run(test.Name, func(t *testing.T) {
+			if got := isMaterialChange(test.Current, test.Suggested, test.MinimumAbsoluteChange); got != test.Want {
+				t.Fatalf("isMaterialChange(%v, %v, %v) = %t, want %t", test.Current, test.Suggested, test.MinimumAbsoluteChange, got, test.Want)
+			}
+		})
+	}
+}
+
+func TestConfidenceMatchesCurrentDetector(t *testing.T) {
+	tests := []struct {
+		hours int
+		want  int
+	}{
+		{hours: 1, want: 20},
+		{hours: 100, want: 56},
+		{hours: 168, want: 95},
+		{hours: 200, want: 113},
+	}
+	for _, test := range tests {
+		if got := recommendationConfidence(test.hours); got != test.want {
+			t.Errorf("recommendationConfidence(%d) = %d, want %d", test.hours, got, test.want)
+		}
 	}
 }
 
@@ -149,7 +209,7 @@ func TestMissingSignalsAreTypedAndDoNotBecomeZeroRecommendations(t *testing.T) {
 		Containers: []ContainerObservation{{
 			Target: Target{Namespace: "shop", Kind: "DaemonSet", Name: "collector", Container: "collector"},
 			CPU: ResourceObservation{
-				CurrentLimit: available(500),
+				CurrentLimit: Signal{},
 			},
 			Memory: ResourceObservation{
 				AggregatedUsage: available(20 * 1024 * 1024),
@@ -169,11 +229,99 @@ func TestMissingSignalsAreTypedAndDoNotBecomeZeroRecommendations(t *testing.T) {
 	if len(memory.Recommendations) != 1 || memory.Recommendations[0].Setting != SettingRequests {
 		t.Fatalf("missing current limit must only allow a request recommendation: %#v", memory.Recommendations)
 	}
-	if cpu.DataQuality.Status != DataQualityUnavailable || !reflect.DeepEqual(cpu.DataQuality.MissingSignals, []SignalName{SignalAggregatedUsage, SignalCurrentRequest}) {
+	if cpu.DataQuality.Status != DataQualityUnavailable || !reflect.DeepEqual(cpu.DataQuality.MissingSignals, []SignalName{SignalAggregatedUsage, SignalCurrentRequest, SignalCurrentLimit}) {
 		t.Fatalf("unexpected CPU quality: %#v", cpu.DataQuality)
 	}
 	if len(cpu.Recommendations) != 0 {
 		t.Fatalf("missing usage emitted numeric recommendations: %#v", cpu.Recommendations)
+	}
+}
+
+func TestMissingLimitIsPartialWhenRequestChangeIsMinor(t *testing.T) {
+	input := Input{
+		SchemaVersion:         InputSchemaVersion,
+		ObservedIntervalHours: 24,
+		Containers: []ContainerObservation{{
+			Target: Target{Namespace: "shop", Kind: "Deployment", Name: "api", Container: "api"},
+			CPU: ResourceObservation{
+				AggregatedUsage: available(100),
+				CurrentRequest:  available(300),
+			},
+			Memory: ResourceObservation{
+				AggregatedUsage: available(20 * 1024 * 1024),
+				CurrentRequest:  available(24 * 1024 * 1024),
+			},
+		}},
+	}
+
+	got, err := Analyze(input, Policy{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, result := range got.Results {
+		if result.DataQuality.Status != DataQualityPartial || !reflect.DeepEqual(result.DataQuality.MissingSignals, []SignalName{SignalCurrentLimit}) {
+			t.Fatalf("unexpected quality for %s: %#v", result.Resource, result.DataQuality)
+		}
+		if len(result.Recommendations) != 0 {
+			t.Fatalf("expected minor %s request change to emit no recommendation: %#v", result.Resource, result.Recommendations)
+		}
+	}
+}
+
+func TestInputOrderDoesNotAffectOutputOrMutateInput(t *testing.T) {
+	first := missingObservation("zeta")
+	second := missingObservation("alpha")
+	input := Input{
+		SchemaVersion:         InputSchemaVersion,
+		ObservedIntervalHours: 1,
+		Containers:            []ContainerObservation{first, second},
+	}
+	reversed := input
+	reversed.Containers = []ContainerObservation{second, first}
+
+	got, err := Analyze(input, Policy{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	gotReversed, err := Analyze(reversed, Policy{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(got, gotReversed) {
+		t.Fatalf("input order changed output\nfirst: %#v\nreversed: %#v", got, gotReversed)
+	}
+	if input.Containers[0].Target.Name != "zeta" {
+		t.Fatalf("Analyze mutated caller input: %#v", input.Containers)
+	}
+}
+
+func TestUnavailableSignalsAreCanonicalizedWithoutMutatingInput(t *testing.T) {
+	input := Input{
+		SchemaVersion:         InputSchemaVersion,
+		ObservedIntervalHours: 1,
+		Containers: []ContainerObservation{{
+			Target: Target{Namespace: "shop", Kind: "Deployment", Name: "api", Container: "api"},
+			CPU: ResourceObservation{
+				AggregatedUsage: Signal{Value: math.NaN()},
+				CurrentRequest:  Signal{Value: math.Inf(1)},
+				CurrentLimit:    Signal{Value: -1},
+			},
+		}},
+	}
+
+	got, err := Analyze(input, Policy{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !math.IsNaN(input.Containers[0].CPU.AggregatedUsage.Value) {
+		t.Fatal("Analyze mutated the caller's unavailable signal")
+	}
+	cpu := got.Results[1]
+	if cpu.Evidence.AggregatedUsage.Value != 0 || cpu.Evidence.CurrentRequest.Value != 0 || cpu.Evidence.CurrentLimit.Value != 0 {
+		t.Fatalf("unavailable signals are not canonical: %#v", cpu.Evidence)
+	}
+	if _, err := json.Marshal(got); err != nil {
+		t.Fatalf("canonical output is not valid JSON: %v", err)
 	}
 }
 
@@ -192,6 +340,12 @@ func TestRejectsInvalidInputAndPolicy(t *testing.T) {
 
 func available(value float64) Signal {
 	return Signal{Available: true, Value: value}
+}
+
+func missingObservation(name string) ContainerObservation {
+	return ContainerObservation{
+		Target: Target{Namespace: "shop", Kind: "Deployment", Name: name, Container: "app"},
+	}
 }
 
 func assertRecommendation(t *testing.T, result ResourceAnalysis, setting Setting, current, suggested float64) {

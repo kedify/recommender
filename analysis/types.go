@@ -4,6 +4,9 @@ package analysis
 const (
 	InputSchemaVersion  = "resource-analysis-input/v1"
 	OutputSchemaVersion = "resource-analysis-output/v1"
+	// ResourceRightSizeDetectorVersion identifies the calculation algorithm
+	// independently from input/output schemas and caller policy.
+	ResourceRightSizeDetectorVersion = "1"
 )
 
 type Input struct {
@@ -71,6 +74,8 @@ type MemoryPolicy struct {
 
 type Output struct {
 	SchemaVersion   string             `json:"schemaVersion"`
+	DetectorVersion string             `json:"detectorVersion"`
+	PolicyVersion   string             `json:"policyVersion"`
 	EffectivePolicy Policy             `json:"effectivePolicy"`
 	Results         []ResourceAnalysis `json:"results"`
 }

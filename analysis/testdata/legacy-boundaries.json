@@ -1,0 +1,44 @@
+[
+  {
+    "name": "below relative threshold",
+    "current": 100,
+    "suggested": 109,
+    "minimumAbsoluteChange": 8,
+    "recommend": false
+  },
+  {
+    "name": "current literal memory absolute threshold",
+    "current": 100,
+    "suggested": 111,
+    "minimumAbsoluteChange": 8,
+    "recommend": true
+  },
+  {
+    "name": "below cpu absolute threshold",
+    "current": 100,
+    "suggested": 149,
+    "minimumAbsoluteChange": 50,
+    "recommend": false
+  },
+  {
+    "name": "at cpu absolute threshold",
+    "current": 100,
+    "suggested": 150,
+    "minimumAbsoluteChange": 50,
+    "recommend": true
+  },
+  {
+    "name": "zero current below cpu absolute threshold",
+    "current": 0,
+    "suggested": 20,
+    "minimumAbsoluteChange": 50,
+    "recommend": false
+  },
+  {
+    "name": "zero current at cpu absolute threshold",
+    "current": 0,
+    "suggested": 50,
+    "minimumAbsoluteChange": 50,
+    "recommend": true
+  }
+]

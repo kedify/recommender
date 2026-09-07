@@ -8,6 +8,9 @@ The `analysis` package accepts normalized per-container observations and a polic
 returns deterministic CPU and memory request/limit recommendations together with the
 evidence and data quality used to produce them.
 
+Input/output schema versions describe the wire shape. The separate detector and
+effective-policy versions preserve recommendation identity across callers.
+
 ```go
 output, err := analysis.Analyze(snapshot, policy)
 ```

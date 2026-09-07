@@ -3,6 +3,8 @@ package analysis
 import (
 	"fmt"
 	"math"
+	"sort"
+	"strconv"
 	"strings"
 )
 
@@ -57,17 +59,17 @@ func NormalizePolicy(policy Policy) (Policy, error) {
 	if policy.CPU.LimitsToRequestsRatio == 0 {
 		policy.CPU.LimitsToRequestsRatio = defaults.CPU.LimitsToRequestsRatio
 	}
-	if policy.CPU.HeadroomCoefficient <= 0 {
+	if !isFinitePositive(policy.CPU.HeadroomCoefficient) {
 		return Policy{}, fmt.Errorf("cpu.headroomCoefficient must be greater than 0")
 	}
-	if policy.CPU.LimitsToRequestsRatio <= 0 {
+	if !isFinitePositive(policy.CPU.LimitsToRequestsRatio) {
 		return Policy{}, fmt.Errorf("cpu.limitsToRequestsRatio must be greater than 0")
 	}
 	if policy.CPU.Strategy == CPUStrategyPercentile {
 		if policy.CPU.Percentile == 0 {
 			policy.CPU.Percentile = defaults.CPU.Percentile
 		}
-		if policy.CPU.Percentile <= 0 || policy.CPU.Percentile >= 100 {
+		if !isFinitePositive(policy.CPU.Percentile) || policy.CPU.Percentile >= 100 {
 			return Policy{}, fmt.Errorf("cpu.percentile must be greater than 0 and less than 100; use cpu.strategy=max for p100")
 		}
 	} else {
@@ -87,14 +89,39 @@ func NormalizePolicy(policy Policy) (Policy, error) {
 	if policy.Memory.LimitsToRequestsRatio == 0 {
 		policy.Memory.LimitsToRequestsRatio = defaults.Memory.LimitsToRequestsRatio
 	}
-	if policy.Memory.HeadroomCoefficient <= 0 {
+	if !isFinitePositive(policy.Memory.HeadroomCoefficient) {
 		return Policy{}, fmt.Errorf("memory.headroomCoefficient must be greater than 0")
 	}
-	if policy.Memory.LimitsToRequestsRatio <= 0 {
+	if !isFinitePositive(policy.Memory.LimitsToRequestsRatio) {
 		return Policy{}, fmt.Errorf("memory.limitsToRequestsRatio must be greater than 0")
 	}
 
 	return policy, nil
+}
+
+// PolicyVersion returns the stable policy identity used in recommendation
+// fingerprints. Equivalent defaulted policies return the same value.
+func PolicyVersion(policy Policy) (string, error) {
+	policy, err := NormalizePolicy(policy)
+	if err != nil {
+		return "", err
+	}
+	return normalizedPolicyVersion(policy), nil
+}
+
+func normalizedPolicyVersion(policy Policy) string {
+	cpuStrategy := string(policy.CPU.Strategy)
+	if policy.CPU.Strategy == CPUStrategyPercentile {
+		cpuStrategy = "p" + formatFloat(policy.CPU.Percentile)
+	}
+	return fmt.Sprintf("cpu=%s,h=%s,r=%s;mem=%s,h=%s,r=%s",
+		cpuStrategy,
+		formatFloat(policy.CPU.HeadroomCoefficient),
+		formatFloat(policy.CPU.LimitsToRequestsRatio),
+		policy.Memory.Strategy,
+		formatFloat(policy.Memory.HeadroomCoefficient),
+		formatFloat(policy.Memory.LimitsToRequestsRatio),
+	)
 }
 
 // Analyze calculates recommendations without querying or mutating external state.
@@ -113,10 +140,19 @@ func Analyze(input Input, policy Policy) (Output, error) {
 
 	output := Output{
 		SchemaVersion:   OutputSchemaVersion,
+		DetectorVersion: ResourceRightSizeDetectorVersion,
+		PolicyVersion:   normalizedPolicyVersion(effectivePolicy),
 		EffectivePolicy: effectivePolicy,
 		Results:         make([]ResourceAnalysis, 0, len(input.Containers)*2),
 	}
-	for i, container := range input.Containers {
+	containers := append([]ContainerObservation(nil), input.Containers...)
+	sort.SliceStable(containers, func(i, j int) bool {
+		return targetLess(containers[i].Target, containers[j].Target)
+	})
+	for i, container := range containers {
+		if i > 0 && container.Target == containers[i-1].Target {
+			return Output{}, fmt.Errorf("containers[%d]: duplicate target", i)
+		}
 		if err := validateObservation(container); err != nil {
 			return Output{}, fmt.Errorf("containers[%d]: %w", i, err)
 		}
@@ -129,6 +165,7 @@ func Analyze(input Input, policy Policy) (Output, error) {
 }
 
 func analyzeResource(target Target, resource Resource, evidence ResourceObservation, intervalHours int, headroom, limitRatio, minimum, minimumAbsoluteChange float64) ResourceAnalysis {
+	evidence = normalizeSignals(evidence)
 	result := ResourceAnalysis{
 		Target:   target,
 		Resource: resource,
@@ -145,9 +182,15 @@ func analyzeResource(target Target, resource Resource, evidence ResourceObservat
 	if !evidence.CurrentRequest.Available {
 		result.DataQuality.MissingSignals = append(result.DataQuality.MissingSignals, SignalCurrentRequest)
 	}
-	if len(result.DataQuality.MissingSignals) != 0 {
+	if !evidence.CurrentLimit.Available {
+		result.DataQuality.MissingSignals = append(result.DataQuality.MissingSignals, SignalCurrentLimit)
+	}
+	if !evidence.AggregatedUsage.Available || !evidence.CurrentRequest.Available {
 		result.DataQuality.Status = DataQualityUnavailable
 		return result
+	}
+	if !evidence.CurrentLimit.Available {
+		result.DataQuality.Status = DataQualityPartial
 	}
 
 	suggestedRequest := math.Max(minimum, evidence.AggregatedUsage.Value*headroom)
@@ -155,7 +198,7 @@ func analyzeResource(target Target, resource Resource, evidence ResourceObservat
 		return result
 	}
 
-	confidence := int(math.Max(minimumConfidence, float64(intervalHours)*maximumConfidence/fullConfidenceHours))
+	confidence := recommendationConfidence(intervalHours)
 	result.Recommendations = append(result.Recommendations, Recommendation{
 		Setting:        SettingRequests,
 		CurrentValue:   evidence.CurrentRequest.Value,
@@ -164,8 +207,6 @@ func analyzeResource(target Target, resource Resource, evidence ResourceObservat
 	})
 
 	if !evidence.CurrentLimit.Available {
-		result.DataQuality.Status = DataQualityPartial
-		result.DataQuality.MissingSignals = []SignalName{SignalCurrentLimit}
 		return result
 	}
 
@@ -184,6 +225,44 @@ func analyzeResource(target Target, resource Resource, evidence ResourceObservat
 func isMaterialChange(current, suggested, minimumAbsoluteChange float64) bool {
 	return math.Max(current, suggested)/math.Min(current, suggested) >= 1+minimumRelativeChange &&
 		math.Abs(current-suggested) >= minimumAbsoluteChange
+}
+
+func recommendationConfidence(intervalHours int) int {
+	return int(math.Max(minimumConfidence, float64(intervalHours)*maximumConfidence/fullConfidenceHours))
+}
+
+func normalizeSignals(observation ResourceObservation) ResourceObservation {
+	if !observation.AggregatedUsage.Available {
+		observation.AggregatedUsage.Value = 0
+	}
+	if !observation.CurrentRequest.Available {
+		observation.CurrentRequest.Value = 0
+	}
+	if !observation.CurrentLimit.Available {
+		observation.CurrentLimit.Value = 0
+	}
+	return observation
+}
+
+func targetLess(left, right Target) bool {
+	if left.Namespace != right.Namespace {
+		return left.Namespace < right.Namespace
+	}
+	if left.Kind != right.Kind {
+		return left.Kind < right.Kind
+	}
+	if left.Name != right.Name {
+		return left.Name < right.Name
+	}
+	return left.Container < right.Container
+}
+
+func formatFloat(value float64) string {
+	return strconv.FormatFloat(value, 'f', -1, 64)
+}
+
+func isFinitePositive(value float64) bool {
+	return value > 0 && !math.IsNaN(value) && !math.IsInf(value, 0)
 }
 
 func validateObservation(observation ContainerObservation) error {
