@@ -4,6 +4,7 @@ on:
   pull_request:
     branches: [main]
 
+# Required by the pinned reusable workflow for PR annotations and SARIF upload.
 permissions:
   actions: read
   checks: write
