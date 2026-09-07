@@ -65,7 +65,7 @@ Exit codes are stable for this protocol:
 | Code | Meaning |
 | ---: | --- |
 | `0` | Analysis completed and a response was written. |
-| `1` | The analyzer could not write its response. |
+| `1` | The analyzer could not read its request or write its response. |
 | `2` | The request, protocol, schema, policy, or normalized input is invalid. |
 
 Release archives include the following executables:

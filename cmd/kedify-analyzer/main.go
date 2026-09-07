@@ -44,7 +44,7 @@ func run(stdin io.Reader, stdout, stderr io.Writer) int {
 	requestBytes, err := io.ReadAll(io.LimitReader(stdin, maxRequestBytes+1))
 	if err != nil {
 		writeDiagnostic(stderr, "unable to read request: %v", err)
-		return exitInvalid
+		return exitInternal
 	}
 	if len(requestBytes) > maxRequestBytes {
 		writeDiagnostic(stderr, "request exceeds %d-byte limit", maxRequestBytes)

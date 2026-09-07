@@ -104,6 +104,19 @@ func TestRunReturnsInternalErrorWhenResponseCannotBeWritten(t *testing.T) {
 	}
 }
 
+func TestRunReturnsInternalErrorWhenRequestCannotBeRead(t *testing.T) {
+	var stdout, stderr bytes.Buffer
+	if code := run(errorReader{}, &stdout, &stderr); code != exitInternal {
+		t.Fatalf("run() = %d, want %d", code, exitInternal)
+	}
+	if stdout.Len() != 0 {
+		t.Fatalf("read failure wrote machine output: %s", stdout.String())
+	}
+	if !strings.Contains(stderr.String(), "unable to read request") {
+		t.Fatalf("unexpected stderr: %s", stderr.String())
+	}
+}
+
 func validRequest(t *testing.T) []byte {
 	t.Helper()
 	inputBytes, err := os.ReadFile("../../analysis/testdata/default-input.json")
@@ -152,4 +165,10 @@ type errorWriter struct{}
 
 func (errorWriter) Write([]byte) (int, error) {
 	return 0, errors.New("write failed")
+}
+
+type errorReader struct{}
+
+func (errorReader) Read([]byte) (int, error) {
+	return 0, errors.New("read failed")
 }
