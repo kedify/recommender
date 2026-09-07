@@ -5,7 +5,8 @@ on:
     branches: [main]
 
 jobs:
-    build-and-test:
-      # Importing a reusable workflow for Go PR checks
-      uses: kedify/github-meta/.github/workflows/go-pr-check.yaml@main
-      secrets: inherit
+  build-and-test:
+    uses: kedify/github-meta/.github/workflows/go-pr-check.yaml@main
+    with:
+      continue_on_error: false
+      skip_private_key_setup: true

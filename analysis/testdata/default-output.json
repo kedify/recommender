@@ -1,0 +1,56 @@
+{
+  "schemaVersion": "resource-analysis-output/v1",
+  "effectivePolicy": {
+    "cpu": {
+      "strategy": "percentile",
+      "percentile": 95,
+      "headroomCoefficient": 3,
+      "limitsToRequestsRatio": 5
+    },
+    "memory": {
+      "strategy": "max",
+      "headroomCoefficient": 1.2,
+      "limitsToRequestsRatio": 3
+    }
+  },
+  "results": [
+    {
+      "target": {
+        "namespace": "shop",
+        "kind": "Deployment",
+        "name": "checkout",
+        "container": "app"
+      },
+      "resource": "memory",
+      "recommendations": [
+        { "setting": "requests", "currentValue": 67108864, "suggestedValue": 31457280, "confidence": 95 },
+        { "setting": "limits", "currentValue": 134217728, "suggestedValue": 94371840, "confidence": 95 }
+      ],
+      "evidence": {
+        "aggregatedUsage": { "available": true, "value": 26214400 },
+        "currentRequest": { "available": true, "value": 67108864 },
+        "currentLimit": { "available": true, "value": 134217728 }
+      },
+      "dataQuality": { "status": "available", "observedIntervalHours": 168 }
+    },
+    {
+      "target": {
+        "namespace": "shop",
+        "kind": "Deployment",
+        "name": "checkout",
+        "container": "app"
+      },
+      "resource": "cpu",
+      "recommendations": [
+        { "setting": "requests", "currentValue": 250, "suggestedValue": 120, "confidence": 95 },
+        { "setting": "limits", "currentValue": 1000, "suggestedValue": 600, "confidence": 95 }
+      ],
+      "evidence": {
+        "aggregatedUsage": { "available": true, "value": 40 },
+        "currentRequest": { "available": true, "value": 250 },
+        "currentLimit": { "available": true, "value": 1000 }
+      },
+      "dataQuality": { "status": "available", "observedIntervalHours": 168 }
+    }
+  ]
+}

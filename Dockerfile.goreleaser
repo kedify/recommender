@@ -1,5 +1,0 @@
-FROM cgr.dev/chainguard/static:latest
-COPY proxy /bin/recommender
-USER 65532:65532
-
-CMD ["/bin/recommender"]

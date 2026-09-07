@@ -1,0 +1,24 @@
+{
+  "schemaVersion": "resource-analysis-input/v1",
+  "observedIntervalHours": 168,
+  "containers": [
+    {
+      "target": {
+        "namespace": "shop",
+        "kind": "Deployment",
+        "name": "checkout",
+        "container": "app"
+      },
+      "cpu": {
+        "aggregatedUsage": { "available": true, "value": 40 },
+        "currentRequest": { "available": true, "value": 250 },
+        "currentLimit": { "available": true, "value": 1000 }
+      },
+      "memory": {
+        "aggregatedUsage": { "available": true, "value": 26214400 },
+        "currentRequest": { "available": true, "value": 67108864 },
+        "currentLimit": { "available": true, "value": 134217728 }
+      }
+    }
+  ]
+}
