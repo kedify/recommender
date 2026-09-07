@@ -98,6 +98,33 @@ func TestPolicyVersionMatchesDashboardIdentity(t *testing.T) {
 	}
 }
 
+func TestNormalizePolicyRejectsLimitRatiosBelowOne(t *testing.T) {
+	tests := []struct {
+		name   string
+		policy Policy
+		want   string
+	}{
+		{
+			name:   "CPU",
+			policy: Policy{CPU: CPUPolicy{LimitsToRequestsRatio: 0.9}},
+			want:   "cpu.limitsToRequestsRatio must be greater than or equal to 1",
+		},
+		{
+			name:   "memory",
+			policy: Policy{Memory: MemoryPolicy{LimitsToRequestsRatio: 0.9}},
+			want:   "memory.limitsToRequestsRatio must be greater than or equal to 1",
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			_, err := NormalizePolicy(test.policy)
+			if err == nil || err.Error() != test.want {
+				t.Fatalf("NormalizePolicy() error = %v, want %q", err, test.want)
+			}
+		})
+	}
+}
+
 func TestCustomPolicy(t *testing.T) {
 	input := Input{
 		SchemaVersion:         InputSchemaVersion,
@@ -322,6 +349,55 @@ func TestUnavailableSignalsAreCanonicalizedWithoutMutatingInput(t *testing.T) {
 	}
 	if _, err := json.Marshal(got); err != nil {
 		t.Fatalf("canonical output is not valid JSON: %v", err)
+	}
+}
+
+func TestAnalyzeRejectsArithmeticOverflow(t *testing.T) {
+	tests := []struct {
+		name   string
+		cpu    ResourceObservation
+		policy Policy
+		want   string
+	}{
+		{
+			name: "request",
+			cpu: ResourceObservation{
+				AggregatedUsage: available(math.MaxFloat64),
+				CurrentRequest:  available(100),
+				CurrentLimit:    available(1000),
+			},
+			policy: Policy{CPU: CPUPolicy{HeadroomCoefficient: 2, LimitsToRequestsRatio: 1}},
+			want:   "containers[0]: cpu suggested request is not finite",
+		},
+		{
+			name: "limit",
+			cpu: ResourceObservation{
+				AggregatedUsage: available(math.MaxFloat64 / 4),
+				CurrentRequest:  available(math.MaxFloat64),
+				CurrentLimit:    available(math.MaxFloat64),
+			},
+			policy: Policy{CPU: CPUPolicy{HeadroomCoefficient: 2, LimitsToRequestsRatio: 3}},
+			want:   "containers[0]: cpu suggested limit is not finite",
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			input := Input{
+				SchemaVersion:         InputSchemaVersion,
+				ObservedIntervalHours: 1,
+				Containers: []ContainerObservation{{
+					Target: Target{Namespace: "shop", Kind: "Deployment", Name: "api", Container: "api"},
+					CPU:    test.cpu,
+				}},
+			}
+			got, err := Analyze(input, test.policy)
+			if err == nil || err.Error() != test.want {
+				t.Fatalf("Analyze() error = %v, want %q", err, test.want)
+			}
+			if !reflect.DeepEqual(got, Output{}) {
+				t.Fatalf("Analyze() returned partial output on overflow: %#v", got)
+			}
+		})
 	}
 }
 

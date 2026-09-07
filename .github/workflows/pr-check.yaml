@@ -4,6 +4,9 @@ on:
   pull_request:
     branches: [main]
 
+permissions:
+  contents: read
+
 jobs:
   build-and-test:
     uses: kedify/github-meta/.github/workflows/go-pr-check.yaml@c9332258ab5bbe61f19115c3b4542fe18ff747fb

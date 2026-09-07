@@ -28,6 +28,3 @@ adapter; the normalized `aggregatedUsage` value must match the supplied policy.
   client and does not embed this private engine.
 - Offline packaging is tracked by
   [`kedify/agent#618`](https://github.com/kedify/agent/issues/618).
-
-The module is a library only. The previous placeholder binary and image deployment
-have been removed.

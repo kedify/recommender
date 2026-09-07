@@ -62,8 +62,8 @@ func NormalizePolicy(policy Policy) (Policy, error) {
 	if !isFinitePositive(policy.CPU.HeadroomCoefficient) {
 		return Policy{}, fmt.Errorf("cpu.headroomCoefficient must be greater than 0")
 	}
-	if !isFinitePositive(policy.CPU.LimitsToRequestsRatio) {
-		return Policy{}, fmt.Errorf("cpu.limitsToRequestsRatio must be greater than 0")
+	if !isFinitePositive(policy.CPU.LimitsToRequestsRatio) || policy.CPU.LimitsToRequestsRatio < 1 {
+		return Policy{}, fmt.Errorf("cpu.limitsToRequestsRatio must be greater than or equal to 1")
 	}
 	if policy.CPU.Strategy == CPUStrategyPercentile {
 		if policy.CPU.Percentile == 0 {
@@ -92,8 +92,8 @@ func NormalizePolicy(policy Policy) (Policy, error) {
 	if !isFinitePositive(policy.Memory.HeadroomCoefficient) {
 		return Policy{}, fmt.Errorf("memory.headroomCoefficient must be greater than 0")
 	}
-	if !isFinitePositive(policy.Memory.LimitsToRequestsRatio) {
-		return Policy{}, fmt.Errorf("memory.limitsToRequestsRatio must be greater than 0")
+	if !isFinitePositive(policy.Memory.LimitsToRequestsRatio) || policy.Memory.LimitsToRequestsRatio < 1 {
+		return Policy{}, fmt.Errorf("memory.limitsToRequestsRatio must be greater than or equal to 1")
 	}
 
 	return policy, nil
@@ -156,15 +156,20 @@ func Analyze(input Input, policy Policy) (Output, error) {
 		if err := validateObservation(container); err != nil {
 			return Output{}, fmt.Errorf("containers[%d]: %w", i, err)
 		}
-		output.Results = append(output.Results,
-			analyzeResource(container.Target, ResourceMemory, container.Memory, input.ObservedIntervalHours, effectivePolicy.Memory.HeadroomCoefficient, effectivePolicy.Memory.LimitsToRequestsRatio, minimumMemoryBytes, minimumMemoryAbsChange),
-			analyzeResource(container.Target, ResourceCPU, container.CPU, input.ObservedIntervalHours, effectivePolicy.CPU.HeadroomCoefficient, effectivePolicy.CPU.LimitsToRequestsRatio, minimumCPUMillicores, minimumCPUAbsoluteChange),
-		)
+		memory, err := analyzeResource(container.Target, ResourceMemory, container.Memory, input.ObservedIntervalHours, effectivePolicy.Memory.HeadroomCoefficient, effectivePolicy.Memory.LimitsToRequestsRatio, minimumMemoryBytes, minimumMemoryAbsChange)
+		if err != nil {
+			return Output{}, fmt.Errorf("containers[%d]: %w", i, err)
+		}
+		cpu, err := analyzeResource(container.Target, ResourceCPU, container.CPU, input.ObservedIntervalHours, effectivePolicy.CPU.HeadroomCoefficient, effectivePolicy.CPU.LimitsToRequestsRatio, minimumCPUMillicores, minimumCPUAbsoluteChange)
+		if err != nil {
+			return Output{}, fmt.Errorf("containers[%d]: %w", i, err)
+		}
+		output.Results = append(output.Results, memory, cpu)
 	}
 	return output, nil
 }
 
-func analyzeResource(target Target, resource Resource, evidence ResourceObservation, intervalHours int, headroom, limitRatio, minimum, minimumAbsoluteChange float64) ResourceAnalysis {
+func analyzeResource(target Target, resource Resource, evidence ResourceObservation, intervalHours int, headroom, limitRatio, minimum, minimumAbsoluteChange float64) (ResourceAnalysis, error) {
 	evidence = normalizeSignals(evidence)
 	result := ResourceAnalysis{
 		Target:   target,
@@ -187,15 +192,18 @@ func analyzeResource(target Target, resource Resource, evidence ResourceObservat
 	}
 	if !evidence.AggregatedUsage.Available || !evidence.CurrentRequest.Available {
 		result.DataQuality.Status = DataQualityUnavailable
-		return result
+		return result, nil
 	}
 	if !evidence.CurrentLimit.Available {
 		result.DataQuality.Status = DataQualityPartial
 	}
 
 	suggestedRequest := math.Max(minimum, evidence.AggregatedUsage.Value*headroom)
+	if math.IsNaN(suggestedRequest) || math.IsInf(suggestedRequest, 0) {
+		return ResourceAnalysis{}, fmt.Errorf("%s suggested request is not finite", resource)
+	}
 	if !isMaterialChange(evidence.CurrentRequest.Value, suggestedRequest, minimumAbsoluteChange) {
-		return result
+		return result, nil
 	}
 
 	confidence := recommendationConfidence(intervalHours)
@@ -207,10 +215,13 @@ func analyzeResource(target Target, resource Resource, evidence ResourceObservat
 	})
 
 	if !evidence.CurrentLimit.Available {
-		return result
+		return result, nil
 	}
 
 	suggestedLimit := suggestedRequest * limitRatio
+	if math.IsNaN(suggestedLimit) || math.IsInf(suggestedLimit, 0) {
+		return ResourceAnalysis{}, fmt.Errorf("%s suggested limit is not finite", resource)
+	}
 	if isMaterialChange(evidence.CurrentLimit.Value, suggestedLimit, minimumAbsoluteChange) {
 		result.Recommendations = append(result.Recommendations, Recommendation{
 			Setting:        SettingLimits,
@@ -219,7 +230,7 @@ func analyzeResource(target Target, resource Resource, evidence ResourceObservat
 			Confidence:     confidence,
 		})
 	}
-	return result
+	return result, nil
 }
 
 func isMaterialChange(current, suggested, minimumAbsoluteChange float64) bool {
