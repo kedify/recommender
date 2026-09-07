@@ -81,6 +81,16 @@ func TestAnalyzerExecutable(t *testing.T) {
 			}
 		})
 	}
+
+	t.Run("oversized input", func(t *testing.T) {
+		result := executeAnalyzer(t, binary, bytes.Repeat([]byte(" "), maxRequestBytes+1), exitInvalid)
+		if len(result.stdout) != 0 {
+			t.Fatalf("oversized request wrote machine output: %s", result.stdout)
+		}
+		if !strings.Contains(string(result.stderr), "request exceeds 16777216-byte limit") {
+			t.Fatalf("unexpected stderr: %s", result.stderr)
+		}
+	})
 }
 
 func TestRunReturnsInternalErrorWhenResponseCannotBeWritten(t *testing.T) {

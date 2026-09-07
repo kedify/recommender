@@ -56,7 +56,9 @@ response. The current request contract is:
 The response contains `protocolVersion`, `analyzerVersion`, `engineVersion`,
 `inputSchemaVersion`, `outputSchemaVersion`, and the engine `output`. Only the exact
 `kedify-analyzer/v1` protocol is accepted. The engine validates its input schema and
-policy; there is no compatibility conversion in the executable.
+policy; there is no compatibility conversion in the executable. CPU
+`aggregatedUsage` must already reflect the policy's `max` or `percentile` selection.
+Requests larger than 16 MiB are rejected before decoding.
 
 Exit codes are stable for this protocol:
 

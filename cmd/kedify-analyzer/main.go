@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -11,6 +12,8 @@ import (
 
 const (
 	protocolVersion = "kedify-analyzer/v1"
+	// Keep one local snapshot request bounded without constraining normal cluster inputs.
+	maxRequestBytes = 16 << 20
 	exitSuccess     = 0
 	exitInternal    = 1
 	exitInvalid     = 2
@@ -38,7 +41,17 @@ func main() {
 }
 
 func run(stdin io.Reader, stdout, stderr io.Writer) int {
-	decoder := json.NewDecoder(stdin)
+	requestBytes, err := io.ReadAll(io.LimitReader(stdin, maxRequestBytes+1))
+	if err != nil {
+		fmt.Fprintf(stderr, "kedify-analyzer: unable to read request: %v\n", err)
+		return exitInvalid
+	}
+	if len(requestBytes) > maxRequestBytes {
+		fmt.Fprintf(stderr, "kedify-analyzer: request exceeds %d-byte limit\n", maxRequestBytes)
+		return exitInvalid
+	}
+
+	decoder := json.NewDecoder(bytes.NewReader(requestBytes))
 	decoder.DisallowUnknownFields()
 
 	var req request
