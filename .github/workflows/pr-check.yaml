@@ -1,11 +1,15 @@
 name: PR checks
 
 on:
-  pull_request_target:
+  pull_request:
     branches: [main]
 
+permissions:
+  contents: read
+
 jobs:
-    build-and-test:
-      # Importing a reusable workflow for Go PR checks
-      uses: kedify/github-meta/.github/workflows/go-pr-check.yaml@main
-      secrets: inherit
+  build-and-test:
+    uses: kedify/github-meta/.github/workflows/go-pr-check.yaml@c9332258ab5bbe61f19115c3b4542fe18ff747fb
+    with:
+      continue_on_error: false
+      skip_private_key_setup: true
