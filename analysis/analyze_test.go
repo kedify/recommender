@@ -172,6 +172,183 @@ func TestObservedSegmentInference(t *testing.T) {
 		t.Fatalf("missing conservative segment inference %+v", r)
 	}
 }
+
+func TestCurrentEvidenceMustBelongToSelectedRelease(t *testing.T) {
+	for _, inferred := range []bool{false, true} {
+		for _, field := range []string{"request", "limit", "inventory"} {
+			for _, before := range []bool{false, true} {
+				name := field
+				if inferred {
+					name += "/inferred"
+				}
+				if before {
+					name += "/before"
+				} else {
+					name += "/at-boundary"
+				}
+				t.Run(name, func(t *testing.T) {
+					in := fixture(1200, 60)
+					c := &in.Containers[0]
+					boundary := epoch + 600000
+					c.Identity.ReleaseStartedAt = boundary
+					if inferred {
+						c.Identity.ReleaseStartedAt = 0
+						c.CPU.Series = append(c.CPU.Series, Series{ID: "previous-release", WorkloadUID: "uid", Release: "B", Kind: SampleGauge, Samples: []Sample{{Timestamp: boundary - 1, Value: 10}}})
+					}
+					ts := boundary
+					if before {
+						ts--
+					}
+					reason := ReasonStaleInventory
+					switch field {
+					case "request":
+						c.CPU.CurrentRequest.Timestamp = ts
+						reason = ReasonStaleRequest
+					case "limit":
+						c.CPU.CurrentLimit.Timestamp = ts
+						reason = ReasonStaleLimit
+					case "inventory":
+						c.Inventory.Timestamp = ts
+					}
+					p := shortPolicy()
+					p.Evidence.FreshnessSeconds = 1200
+					r := run(t, in, p).Results[1]
+					if r.Evidence.Identity.ReleaseStartedAt != boundary {
+						t.Fatalf("wrong selected release boundary: %+v", r.Evidence.Identity)
+					}
+					if !before {
+						if has(r.DataQuality, reason) || len(r.Recommendations) != 2 {
+							t.Fatalf("evidence at release boundary must remain valid: %+v", r)
+						}
+						return
+					}
+					if !has(r.DataQuality, reason) {
+						t.Fatalf("pre-release evidence was accepted as fresh: %+v", r)
+					}
+					if field == "limit" {
+						if len(r.Recommendations) != 1 || r.Recommendations[0].Setting != SettingRequests {
+							t.Fatalf("pre-release limit should block only limit advice: %+v", r)
+						}
+					} else if len(r.Recommendations) != 0 || r.NoActionReason != reason {
+						t.Fatalf("pre-release evidence authorized downsizing: %+v", r)
+					}
+				})
+			}
+		}
+	}
+}
+
+func TestCounterGapSurvivesDiscardedRate(t *testing.T) {
+	for _, terminal := range []bool{false, true} {
+		t.Run(map[bool]string{false: "internal", true: "terminal"}[terminal], func(t *testing.T) {
+			in := fixture(1200, 60)
+			s := &in.Containers[0].CPU.Series[0]
+			s.Kind = SampleCPUCounterSeconds
+			for i := range s.Samples {
+				s.Samples[i].Value = float64(i) * .6
+			}
+			if terminal {
+				s.Samples = append(s.Samples[:19], s.Samples[20]) // Last raw interval is 120 seconds.
+			} else {
+				s.Samples = append(s.Samples[:10], s.Samples[11:]...)
+			}
+			p := shortPolicy()
+			p.Evidence.MaximumGapSeconds = 90
+			p.Evidence.FreshnessSeconds = 300
+			r := run(t, in, p).Results[1]
+			if r.DataQuality.MaximumGapSeconds != 120 || r.DataQuality.GapCount != 1 || !has(r.DataQuality, ReasonInterruptedHistory) {
+				t.Fatalf("discarded rate hid or duplicated the raw counter gap: %+v", r.DataQuality)
+			}
+			if len(r.Recommendations) != 0 || r.NoActionReason != ReasonInterruptedHistory || has(r.DataQuality, ReasonStaleUsage) || has(r.DataQuality, ReasonSparseCoverage) {
+				t.Fatalf("raw counter gap must independently block otherwise fresh, covered usage: %+v", r)
+			}
+		})
+	}
+}
+
+func TestAggregateTimestampTracksSelectedObservation(t *testing.T) {
+	for _, kind := range []SampleKind{SampleGauge, SampleCPUCounterSeconds} {
+		t.Run(string(kind), func(t *testing.T) {
+			in := fixture(600, 60)
+			c := &in.Containers[0]
+			c.Memory.Series[0].Samples = append(c.Memory.Series[0].Samples, Sample{Timestamp: epoch + 233127, Value: 100 * 1024 * 1024})
+			s := &c.CPU.Series[0]
+			s.Kind = kind
+			counter := 0.0
+			for i := range s.Samples {
+				value := float64(i)
+				if kind == SampleCPUCounterSeconds {
+					counter += value * .06
+					value = counter
+				}
+				s.Samples[i].Value = value
+			}
+			p := shortPolicy()
+			p.CPU.Percentile = 50
+			out := run(t, in, p)
+			for i, want := range []int64{epoch + 233127, epoch + 300000} {
+				r := out.Results[i]
+				if r.Evidence.AggregatedUsage.Timestamp != want || r.DataQuality.ObservedEnd != in.EvaluationTime {
+					t.Fatalf("aggregate timestamp must identify its source independently of freshness: %+v", r)
+				}
+			}
+		})
+	}
+}
+
+func TestAggregateTimestampTiesAreDeterministic(t *testing.T) {
+	in := fixture(600, 60)
+	c := &in.Containers[0]
+	first := &c.CPU.Series[0]
+	first.ID = "a"
+	first.Samples[2].Value = 100
+	first.Samples[3].Value = 100
+	second := *first
+	second.ID, second.PodUID = "z", "second"
+	second.Samples = append([]Sample(nil), first.Samples...)
+	second.Samples[8].Value = 100
+	second.Samples[9].Value = 100
+	weak := second
+	weak.ID, weak.PodUID = "weak", "third"
+	weak.Samples = []Sample{{Timestamp: epoch + 540000, Value: 10}, {Timestamp: epoch + 600000, Value: 100}}
+	c.CPU.Series = append(c.CPU.Series, second, weak)
+	c.Inventory.Eligible, c.Inventory.Observed = 3, 3
+	p := shortPolicy()
+	p.CPU.Strategy = CPUStrategyMax
+	out := run(t, in, p)
+	usage := out.Results[1].Evidence.AggregatedUsage
+	if usage.Value != 100 || usage.Timestamp != epoch+540000 {
+		t.Fatalf("equal aggregates must use the strongest series and latest matching source sample: %+v", usage)
+	}
+	c.CPU.Series[0], c.CPU.Series[2] = c.CPU.Series[2], c.CPU.Series[0]
+	for _, s := range c.CPU.Series {
+		for i, j := 0, len(s.Samples)-1; i < j; i, j = i+1, j-1 {
+			s.Samples[i], s.Samples[j] = s.Samples[j], s.Samples[i]
+		}
+	}
+	if got := run(t, in, p); !reflect.DeepEqual(out, got) {
+		t.Fatal("series or sample order changed tied aggregate provenance")
+	}
+}
+
+func TestInventoryReasonOnlyForMaterialSuppressedDownsize(t *testing.T) {
+	for _, current := range []float64{29, 31, 1000} {
+		in := fixture(600, 60)
+		c := &in.Containers[0]
+		c.Inventory.Available = false
+		c.CPU.CurrentRequest.Value = current // Suggested request is 30m.
+		p := shortPolicy()
+		p.CPU.RequestsOnly = true
+		r := run(t, in, p).Results[1]
+		want := ReasonNoMaterialChange
+		if current == 1000 {
+			want = ReasonUnknownInventory
+		}
+		if r.NoActionReason != want || len(r.Recommendations) != 0 || !has(r.DataQuality, ReasonUnknownInventory) {
+			t.Fatalf("current %v: misleading inventory blocker: %+v", current, r)
+		}
+	}
+}
 func TestStaleGapsDuplicatesAndFreshSignals(t *testing.T) {
 	for _, mode := range []string{"stale", "gap", "duplicates", "request", "limit"} {
 		t.Run(mode, func(t *testing.T) {

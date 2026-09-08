@@ -65,7 +65,7 @@
         "aggregatedUsage": {
           "available": true,
           "value": 104857600,
-          "timestamp": 1800000600000
+          "timestamp": 1800000233127
         },
         "currentRequest": {
           "available": true,
@@ -136,7 +136,7 @@
         "aggregatedUsage": {
           "available": true,
           "value": 50,
-          "timestamp": 1800000600000
+          "timestamp": 1800000300000
         },
         "currentRequest": {
           "available": true,

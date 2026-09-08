@@ -209,7 +209,7 @@ func analyzeResource(in Input, c ContainerObservation, r Resource, p Policy) (Re
 		if !s.value.Available {
 			addReason(q, s.missing)
 			*s.ok = false
-		} else if stale(s.value.Timestamp, in, p.Evidence) {
+		} else if stale(s.value.Timestamp, in, p.Evidence) || s.value.Timestamp < identity.ReleaseStartedAt {
 			addReason(q, s.old)
 			*s.ok = false
 		}
@@ -222,7 +222,7 @@ func analyzeResource(in Input, c ContainerObservation, r Resource, p Policy) (Re
 	case !c.Inventory.Available:
 		addReason(q, ReasonUnknownInventory)
 		inventoryOK = false
-	case stale(c.Inventory.Timestamp, in, p.Evidence):
+	case stale(c.Inventory.Timestamp, in, p.Evidence) || c.Inventory.Timestamp < identity.ReleaseStartedAt:
 		addReason(q, ReasonStaleInventory)
 		inventoryOK = false
 	case c.Inventory.Excluded > 0:
@@ -245,6 +245,7 @@ func analyzeResource(in Input, c ContainerObservation, r Resource, p Policy) (Re
 	if suggestedRequest != usage.Value*headroom || suggestedLimit != suggestedRequest*ratio {
 		addReason(q, ReasonBounds)
 	}
+	inventorySuppressedDownsize := false
 	for _, s := range []struct {
 		setting   Setting
 		current   Signal
@@ -267,6 +268,7 @@ func analyzeResource(in Input, c ContainerObservation, r Resource, p Policy) (Re
 			}
 		}
 		if (s.suggested < s.current.Value || (s.setting == SettingLimits && s.current.Value == 0)) && !inventoryOK {
+			inventorySuppressedDownsize = inventorySuppressedDownsize || isMaterial(s.current.Value, s.suggested, bounds)
 			continue
 		}
 		// Do not propose a request above a known retained limit.
@@ -285,7 +287,7 @@ func analyzeResource(in Input, c ContainerObservation, r Resource, p Policy) (Re
 		q.Status = DataQualityPartial
 	}
 	if len(result.Recommendations) == 0 {
-		if !inventoryOK {
+		if inventorySuppressedDownsize {
 			for _, reason := range q.Reasons {
 				if reason == ReasonUnknownInventory || reason == ReasonStaleInventory || reason == ReasonIncompleteInventory || reason == ReasonExcludedContainers {
 					result.NoActionReason = reason
@@ -329,6 +331,7 @@ func normalizeUsage(in Input, c ContainerObservation, obs ResourceObservation, r
 	pods := map[string]bool{}
 	selected := 0
 	aggregate := 0.0
+	aggregateTimestamp := int64(0)
 	aggregateConfidence := 0.0
 	releaseTimes := []int64{}
 	cadences := []float64{}
@@ -375,7 +378,28 @@ func normalizeUsage(in Input, c ContainerObservation, obs ResourceObservation, r
 		if len(clean) == 0 {
 			continue
 		}
-		values := make([]float64, 0, len(clean))
+		// Preserve actual source gaps before counter intervals are discarded.
+		// Derived rate timestamps can omit a terminal gap or combine an internal
+		// gap with the following valid interval.
+		sourceGaps := make([]float64, 0, len(clean)-1)
+		for i := 1; i < len(clean); i++ {
+			sourceGaps = append(sourceGaps, float64(clean[i].Timestamp-clean[i-1].Timestamp)/1000)
+		}
+		if len(sourceGaps) > 0 {
+			sort.Float64s(sourceGaps)
+			sourceCadence := sourceGaps[(len(sourceGaps)-1)/2]
+			for _, gap := range sourceGaps {
+				q.MaximumGapSeconds = math.Max(q.MaximumGapSeconds, gap)
+				oversizedCounterGap := s.Kind == SampleCPUCounterSeconds && gap > float64(p.Evidence.MaximumGapSeconds)
+				if gap > 1.5*sourceCadence || oversizedCounterGap {
+					q.GapCount++
+				}
+				if oversizedCounterGap {
+					addReason(q, ReasonInterruptedHistory)
+				}
+			}
+		}
+		values := make([]Sample, 0, len(clean))
 		timestamps := make([]int64, 0, len(clean))
 		if s.Kind == SampleCPUCounterSeconds {
 			for i := 1; i < len(clean); i++ {
@@ -391,12 +415,12 @@ func normalizeUsage(in Input, c ContainerObservation, obs ResourceObservation, r
 				if !finite(rate) {
 					return Signal{}, 0, 0, fmt.Errorf("CPU rate overflow")
 				}
-				values = append(values, rate)
+				values = append(values, Sample{Value: rate, Timestamp: clean[i].Timestamp})
 				timestamps = append(timestamps, clean[i].Timestamp)
 			}
 		} else {
 			for _, v := range clean {
-				values = append(values, v.Value)
+				values = append(values, v)
 				timestamps = append(timestamps, v.Timestamp)
 			}
 		}
@@ -433,15 +457,12 @@ func normalizeUsage(in Input, c ContainerObservation, obs ResourceObservation, r
 			cadence = sorted[(len(sorted)-1)/2]
 			cadences = append(cadences, cadence)
 		}
-		for _, gap := range gaps {
-			if gap > q.MaximumGapSeconds {
-				q.MaximumGapSeconds = gap
+		sort.Slice(values, func(i, j int) bool {
+			if values[i].Value == values[j].Value {
+				return values[i].Timestamp < values[j].Timestamp
 			}
-			if gap > 1.5*cadence {
-				q.GapCount++
-			}
-		}
-		sort.Float64s(values)
+			return values[i].Value < values[j].Value
+		})
 		value := values[len(values)-1]
 		if r == ResourceCPU && p.CPU.Strategy == CPUStrategyPercentile {
 			rank := int(math.Ceil(p.CPU.Percentile/100*float64(len(values)))) - 1
@@ -449,6 +470,10 @@ func normalizeUsage(in Input, c ContainerObservation, obs ResourceObservation, r
 				rank = 0
 			}
 			value = values[rank]
+			// Use the latest actual observation supplying this percentile value.
+			for i := rank + 1; i < len(values) && values[i].Value == value.Value; i++ {
+				value = values[i]
+			}
 		}
 		// The release may have enough history while a new replica alone supplies
 		// its sizing value. Keep eligibility release-wide but do not borrow
@@ -463,12 +488,12 @@ func normalizeUsage(in Input, c ContainerObservation, obs ResourceObservation, r
 			seriesCoverage = math.Min(1, seriesCovered/seriesSpan)
 		}
 		seriesConfidence := 95 * math.Min(1, seriesSpan/float64(p.Evidence.MinimumHistorySeconds)) * seriesCoverage * math.Min(1, float64(n)/float64(p.Evidence.MinimumSamples))
-		if value > aggregate || selected == 1 {
-			aggregate = value
+		// Equal values use the strongest supporting series, then its latest
+		// source timestamp, independent of input order.
+		if value.Value > aggregate || selected == 1 || value.Value == aggregate && (seriesConfidence > aggregateConfidence || seriesConfidence == aggregateConfidence && value.Timestamp > aggregateTimestamp) {
+			aggregate = value.Value
+			aggregateTimestamp = value.Timestamp
 			aggregateConfidence = seriesConfidence
-		} else if value == aggregate {
-			// Equal sizing values can use the strongest independently supporting series.
-			aggregateConfidence = math.Max(aggregateConfidence, seriesConfidence)
 		}
 	}
 	q.SeriesCount = selected
@@ -522,7 +547,7 @@ func normalizeUsage(in Input, c ContainerObservation, obs ResourceObservation, r
 	}
 	confidence := int(math.Floor(95 * math.Min(1, minSpan/float64(p.Evidence.MinimumHistorySeconds)) * q.Coverage * math.Min(1, float64(minCount)/float64(p.Evidence.MinimumSamples))))
 	confidence = min(confidence, int(math.Floor(aggregateConfidence)))
-	return Signal{Available: true, Value: aggregate, Timestamp: q.ObservedEnd}, confidence, len(pods), nil
+	return Signal{Available: true, Value: aggregate, Timestamp: aggregateTimestamp}, confidence, len(pods), nil
 }
 
 // selectReleaseSegment derives a conservative observed segment boundary when

@@ -86,6 +86,8 @@ type Sample struct {
 
 // Signal distinguishes observed zero from missing. The timestamp is the source
 // observation time; adapters mark inconsistent replica settings unavailable.
+// Aggregated usage retains the selected sample's timestamp (the interval end for
+// a CPU rate). DataQuality.ObservedEnd separately reports the latest usable sample.
 type Signal struct {
 	Available bool    `json:"available"`
 	Value     float64 `json:"value"`
