@@ -1,201 +1,189 @@
-                                 Apache License
-                           Version 2.0, January 2004
-                        http://www.apache.org/licenses/
+Kedify Commercial Subscription License
+Version 1.0
 
-   TERMS AND CONDITIONS FOR USE, REPRODUCTION, AND DISTRIBUTION
+Copyright Kedify Inc. All rights reserved in Kedify-owned material.
 
-   1. Definitions.
+1. Parties and scope. This license is between Kedify Inc. ("Kedify") and the
+person or legal entity exercising the rights below ("you"). A person acting
+for an entity must have authority to bind it. "Software" means the
+Kedify-owned software and related documentation identified as covered by this
+license and provided or expressly authorized by Kedify for your use. It
+includes covered portions of source code, executable code, container images
+and updates. It excludes separately licensed material identified in license
+notices. By accepting this license or exercising rights it grants, you agree
+to its terms. If you do not agree, you may not exercise those rights. Access
+to a repository, an account or a copy of the Software does not by itself
+establish a subscription or authorize production use. This does not restrict
+rights you independently hold under another applicable license.
 
-      "License" shall mean the terms and conditions for use, reproduction,
-      and distribution as defined by Sections 1 through 9 of this document.
+2. Commercial entitlement. An "Order" is an order form, online subscription
+confirmation or marketplace order accepted by you and Kedify that identifies
+the customer, covered products or features, subscription period and usage
+limits. While your Order is active and your production rights have not been
+suspended or terminated under section 6, Kedify grants you a worldwide,
+nonexclusive, nontransferable and nonsublicensable right to install, copy and
+run the covered Software within those limits for your own operations.
+Installation and operation may be in your own environment, including offline
+operation, within the covered scope. This includes supporting applications and
+services you operate for your customers, provided you do not make the Software
+itself or its autoscaling, recommendation or other covered functionality
+available to them as a separate service.
 
-      "Licensor" shall mean the copyright owner or entity authorized by
-      the copyright owner that is granting the License.
+Your employees and contractors may exercise these rights solely on your behalf
+and under your responsibility. Affiliates, resellers and managed-service
+providers require express coverage in the Order. Source compilation and
+modification for production are permitted only if the Order or the Public
+Source Addendum expressly grants those rights. An entitlement covers only the
+identified products and does not license all Kedify repositories, internal
+tools or features.
 
-      "Legal Entity" shall mean the union of the acting entity and all
-      other entities that control, are controlled by, or are under common
-      control with that entity. For the purposes of this definition,
-      "control" means (i) the power, direct or indirect, to cause the
-      direction or management of such entity, whether by contract or
-      otherwise, or (ii) ownership of fifty percent (50%) or more of the
-      outstanding shares, or (iii) beneficial ownership of such entity.
+3. Evaluation and demonstrations. Without a paid subscription, you may
+install, copy and run a copy expressly supplied or designated by Kedify for
+evaluation for 30 consecutive calendar days from the date specified in
+Kedify's trial confirmation, or, if none is specified, from your first
+execution of that copy. One evaluation period is permitted per organization
+and covered product; obtaining another version or creating another account
+does not restart it. Kedify may extend or vary the evaluation in a written
+confirmation.
 
-      "You" (or "Your") shall mean an individual or Legal Entity
-      exercising permissions granted by this License.
+Evaluation permits internal testing and demonstrations to your personnel to
+decide whether to purchase Kedify. It does not permit operational reliance,
+provision of a service to another person or use to deliver paid consulting
+results. Use with live workloads or for actual operational decisions requires
+a written trial confirmation expressly identifying that permitted scope.
+Recommendations used to set real resource configurations, purchase
+infrastructure capacity or make other operational decisions count as
+production use even if the Software is read-only, runs offline or makes no
+automatic changes. Deciding whether to purchase Kedify does not itself count
+as production use.
 
-      "Source" form shall mean the preferred form for making modifications,
-      including but not limited to software source code, documentation
-      source, and configuration files.
+Kedify and persons acting under its internal authorization may develop, test
+and demonstrate its Software as authorized. Partners may demonstrate the
+Software to prospects within the scope and duration of a written Kedify
+partner or demonstration authorization, without purchasing a customer
+subscription for those demonstrations. An authorization to demonstrate does
+not allow the prospect to operate the Software independently after the
+demonstration.
 
-      "Object" form shall mean any form resulting from mechanical
-      transformation or translation of a Source form, including but
-      not limited to compiled object code, generated documentation,
-      and conversions to other media types.
+4. Restrictions. Except as expressly permitted by this license, an Order, the
+Public Source Addendum or applicable law that cannot be excluded, you may not
+distribute, sublicense, sell, rent, lease or transfer the Software; supply its
+functionality to third parties as a hosted service, managed service or service
+bureau; incorporate it into a product you provide to others; or use it to
+develop or provide a competing product or service. You may not circumvent
+entitlement or license controls, remove legal notices, or use Kedify's
+trademarks except for truthful identification allowed by applicable law. These
+restrictions govern use of the covered Software and do not claim control over
+independently created software that does not use it.
 
-      "Work" shall mean the work of authorship, whether in Source or
-      Object form, made available under the License, as indicated by a
-      copyright notice that is included in or attached to the work
-      (an example is provided in the Appendix below).
+5. Ownership and third-party rights. The Software is licensed, not sold.
+Kedify retains all rights in its own Software, including its own
+modifications, and reserves all rights not expressly granted. This license
+grants no ownership of Kedify intellectual property. You retain ownership of
+your original private modifications without acquiring ownership of the
+underlying Software; their use remains subject to this license and any
+required active entitlement. This license does not transfer ownership of your
+data or unrelated works to Kedify. Before Kedify accepts submitted code for
+inclusion, the relevant rights holder must sign a separate contribution
+agreement assigning the submitted original code to Kedify. This license does
+not itself assign another person's copyright or transfer third-party rights.
 
-      "Derivative Works" shall mean any work, whether in Source or Object
-      form, that is based on (or derived from) the Work and for which the
-      editorial revisions, annotations, elaborations, or other modifications
-      represent, as a whole, an original work of authorship. For the purposes
-      of this License, Derivative Works shall not include works that remain
-      separable from, or merely link (or bind by name) to the interfaces of,
-      the Work and Derivative Works thereof.
+Third-party material remains subject to its identified licenses, which control
+that material if these terms conflict. Nothing here limits rights already
+granted under an applicable third-party or prior open-source license. For the
+duration and scope of the rights granted here, Kedify grants a nonexclusive
+patent license under claims it is entitled to license that are necessarily
+infringed by the covered Software as supplied by Kedify. This grant also
+covers permitted modifications to the extent they continue to practice those
+same claims; it does not cover additional claims infringed solely because of
+your modifications or combinations. No trademark license is granted.
 
-      "Contribution" shall mean any work of authorship, including
-      the original version of the Work and any modifications or additions
-      to that Work or Derivative Works thereof, that is intentionally
-      submitted to Licensor for inclusion in the Work by the copyright owner
-      or by an individual or Legal Entity authorized to submit on behalf of
-      the copyright owner. For the purposes of this definition, "submitted"
-      means any form of electronic, verbal, or written communication sent
-      to the Licensor or its representatives, including but not limited to
-      communication on electronic mailing lists, source code control systems,
-      and issue tracking systems that are managed by, or on behalf of, the
-      Licensor for the purpose of discussing and improving the Work, but
-      excluding communication that is conspicuously marked or otherwise
-      designated in writing by the copyright owner as "Not a Contribution."
+6. Expiration and termination. Production rights end when the relevant
+subscription expires or terminates. Evaluation and demonstration rights end at
+the expiration of their authorized periods. Suspension, termination and cure
+procedures in a controlling customer agreement or Order prevail under section
+8.
 
-      "Contributor" shall mean Licensor and any individual or Legal Entity
-      on behalf of whom a Contribution has been received by Licensor and
-      subsequently incorporated within the Work.
+Where those documents do not specify a different procedure, Kedify may suspend
+production rights by written notice when the applicable fees are more than 30
+days overdue. Suspension ends when the overdue fees are paid or Kedify
+confirms another resolution in writing, provided the Order remains active and
+no other suspension or termination ground applies. Kedify may terminate rights
+by written notice for a curable material breach if it remains uncured 30 days
+after written notice of the breach, and immediately by written notice for a
+material breach that cannot be cured. A cure period does not extend an expired
+entitlement or authorize use beyond its scope.
 
-   2. Grant of Copyright License. Subject to the terms and conditions of
-      this License, each Contributor hereby grants to You a perpetual,
-      worldwide, non-exclusive, no-charge, royalty-free, irrevocable
-      copyright license to reproduce, prepare Derivative Works of,
-      publicly display, publicly perform, sublicense, and distribute the
-      Work and such Derivative Works in Source or Object form.
+When your rights end, stop the affected use and remove the affected Software
+from active systems. You may retain one inactive archival copy solely for
+legal recordkeeping and inaccessible backup copies until their ordinary
+deletion, provided they are not restored for use without authorization. This
+does not require deletion of your data or materials you independently have the
+right to retain. Ownership, reserved rights, restrictions applicable to
+retained copies and liability provisions survive. An express public-source
+inspection right and independent third-party rights survive according to their
+own terms.
 
-   3. Grant of Patent License. Subject to the terms and conditions of
-      this License, each Contributor hereby grants to You a perpetual,
-      worldwide, non-exclusive, no-charge, royalty-free, irrevocable
-      (except as stated in this section) patent license to make, have made,
-      use, offer to sell, sell, import, and otherwise transfer the Work,
-      where such license applies only to those patent claims licensable
-      by such Contributor that are necessarily infringed by their
-      Contribution(s) alone or by combination of their Contribution(s)
-      with the Work to which such Contribution(s) was submitted. If You
-      institute patent litigation against any entity (including a
-      cross-claim or counterclaim in a lawsuit) alleging that the Work
-      or a Contribution incorporated within the Work constitutes direct
-      or contributory patent infringement, then any patent licenses
-      granted to You under this License for that Work shall terminate
-      as of the date such litigation is filed.
+7. Warranty and liability. Any support, service levels, warranties, remedies
+and liability allocation expressly agreed in the applicable customer agreement
+control. Subject to those agreed terms, the following provisions apply to the
+fullest extent permitted by applicable law.
 
-   4. Redistribution. You may reproduce and distribute copies of the
-      Work or Derivative Works thereof in any medium, with or without
-      modifications, and in Source or Object form, provided that You
-      meet the following conditions:
+The Software is provided "AS IS" and "AS AVAILABLE," without express or
+implied warranties, including merchantability, fitness for a particular
+purpose and noninfringement. Kedify excludes liability for lost profits, lost
+data and indirect or consequential damages.
 
-      (a) You must give any other recipients of the Work or
-          Derivative Works a copy of this License; and
+For evaluation, demonstration and other permissions expressly granted without
+a paid subscription under this license or the Public Source Addendum, Kedify
+has no liability for damages arising out of or relating to that access or use,
+whether in contract, tort or otherwise.
 
-      (b) You must cause any modified files to carry prominent notices
-          stating that You changed the files; and
+For paid use, Kedify's aggregate liability under this license is limited to
+the fees actually paid to Kedify for the affected Software during the 12
+months preceding the claim.
 
-      (c) You must retain, in the Source form of any Derivative Works
-          that You distribute, all copyright, patent, trademark, and
-          attribution notices from the Source form of the Work,
-          excluding those notices that do not pertain to any part of
-          the Derivative Works; and
+These liability exclusions and limitations apply only to Kedify's liability.
+They do not limit your payment obligations or remedies legally available to
+Kedify for unauthorized use, copying or distribution. Nothing in this section
+excludes or limits liability that applicable law does not permit to be
+excluded or limited.
 
-      (d) If the Work includes a "NOTICE" text file as part of its
-          distribution, then any Derivative Works that You distribute must
-          include a readable copy of the attribution notices contained
-          within such NOTICE file, excluding those notices that do not
-          pertain to any part of the Derivative Works, in at least one
-          of the following places: within a NOTICE text file distributed
-          as part of the Derivative Works; within the Source form or
-          documentation, if provided along with the Derivative Works; or,
-          within a display generated by the Derivative Works, if and
-          wherever such third-party notices normally appear. The contents
-          of the NOTICE file are for informational purposes only and
-          do not modify the License. You may add Your own attribution
-          notices within Derivative Works that You distribute, alongside
-          or as an addendum to the NOTICE text from the Work, provided
-          that such additional attribution notices cannot be construed
-          as modifying the License.
+8. Precedence and changes. A separate customer agreement or product EULA
+accepted by you and Kedify for the same Software, together with its
+incorporated Orders and amendments, controls to the extent of a conflict with
+this license or the Public Source Addendum. Those documents retain the
+precedence established by their own terms. They are amended only in the manner
+they require; publication or use of this license does not itself amend them.
+Where no such separate agreement applies, an accepted Order prevails over the
+Public Source Addendum, which prevails over this license, to the extent of an
+actual conflict.
 
-      You may add Your own copyright statement to Your modifications and
-      may provide additional or different license terms and conditions
-      for use, reproduction, or distribution of Your modifications, or
-      for any such Derivative Works as a whole, provided Your use,
-      reproduction, and distribution of the Work otherwise complies with
-      the conditions stated in this License.
+For Software Kedify expressly supplies under this license, this license and
+the Public Source Addendum replace Kedify's general website Terms of Use
+concerning that Software's use and licensing, including warranties, liability
+and dispute terms for that Software. This replacement does not apply where the
+website terms form part of a controlling separate customer agreement or
+product EULA; that agreement's amendment requirements govern. Website access
+and separately supplied hosted services otherwise remain subject to their
+applicable terms. Third-party licenses and earlier open-source grants remain
+unaffected.
 
-   5. Submission of Contributions. Unless You explicitly state otherwise,
-      any Contribution intentionally submitted for inclusion in the Work
-      by You to the Licensor shall be under the terms and conditions of
-      this License, without any additional terms or conditions.
-      Notwithstanding the above, nothing herein shall supersede or modify
-      the terms of any separate license agreement you may have executed
-      with Licensor regarding such Contributions.
+A new license version applies only when validly agreed or accompanying a newly
+obtained version under its stated terms. Publication alone does not change the
+terms for an already obtained version or revoke earlier grants. An amendment
+to a controlling agreement must follow that agreement's amendment procedure.
 
-   6. Trademarks. This License does not grant permission to use the trade
-      names, trademarks, service marks, or product names of the Licensor,
-      except as required for reasonable and customary use in describing the
-      origin of the Work and reproducing the content of the NOTICE file.
+9. Governing law and general terms. The governing law and dispute procedures
+in a controlling customer agreement or Order apply. Otherwise, this license is
+governed by California law, excluding its conflict-of-laws rules, and
+applicable United States federal law. Disputes may be brought before a court
+with jurisdiction under applicable law. This license does not require
+arbitration or designate an exclusive court venue.
 
-   7. Disclaimer of Warranty. Unless required by applicable law or
-      agreed to in writing, Licensor provides the Work (and each
-      Contributor provides its Contributions) on an "AS IS" BASIS,
-      WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or
-      implied, including, without limitation, any warranties or conditions
-      of TITLE, NON-INFRINGEMENT, MERCHANTABILITY, or FITNESS FOR A
-      PARTICULAR PURPOSE. You are solely responsible for determining the
-      appropriateness of using or redistributing the Work and assume any
-      risks associated with Your exercise of permissions under this License.
-
-   8. Limitation of Liability. In no event and under no legal theory,
-      whether in tort (including negligence), contract, or otherwise,
-      unless required by applicable law (such as deliberate and grossly
-      negligent acts) or agreed to in writing, shall any Contributor be
-      liable to You for damages, including any direct, indirect, special,
-      incidental, or consequential damages of any character arising as a
-      result of this License or out of the use or inability to use the
-      Work (including but not limited to damages for loss of goodwill,
-      work stoppage, computer failure or malfunction, or any and all
-      other commercial damages or losses), even if such Contributor
-      has been advised of the possibility of such damages.
-
-   9. Accepting Warranty or Additional Liability. While redistributing
-      the Work or Derivative Works thereof, You may choose to offer,
-      and charge a fee for, acceptance of support, warranty, indemnity,
-      or other liability obligations and/or rights consistent with this
-      License. However, in accepting such obligations, You may act only
-      on Your own behalf and on Your sole responsibility, not on behalf
-      of any other Contributor, and only if You agree to indemnify,
-      defend, and hold each Contributor harmless for any liability
-      incurred by, or claims asserted against, such Contributor by reason
-      of your accepting any such warranty or additional liability.
-
-   END OF TERMS AND CONDITIONS
-
-   APPENDIX: How to apply the Apache License to your work.
-
-      To apply the Apache License to your work, attach the following
-      boilerplate notice, with the fields enclosed by brackets "[]"
-      replaced with your own identifying information. (Don't include
-      the brackets!)  The text should be enclosed in the appropriate
-      comment syntax for the file format. We also recommend that a
-      file or class name and description of purpose be included on the
-      same "printed page" as the copyright notice for easier
-      identification within third-party archives.
-
-   Copyright [yyyy] [name of copyright owner]
-
-   Licensed under the Apache License, Version 2.0 (the "License");
-   you may not use this file except in compliance with the License.
-   You may obtain a copy of the License at
-
-       http://www.apache.org/licenses/LICENSE-2.0
-
-   Unless required by applicable law or agreed to in writing, software
-   distributed under the License is distributed on an "AS IS" BASIS,
-   WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-   See the License for the specific language governing permissions and
-   limitations under the License.
+Notices under this license must be in writing and delivered to the notice
+contact in the applicable agreement or Order, or otherwise to a business
+contact designated by the receiving party for the covered Software. A notice
+period begins when the notice is received. If a provision is unenforceable,
+the remaining provisions continue to apply to the extent permitted by law. A
+failure to enforce a provision does not waive the right to enforce it later.

@@ -1,0 +1,45 @@
+Kedify Public Source Addendum
+Version 1.0
+
+Copyright Kedify Inc. All rights reserved in Kedify-owned material.
+
+This addendum applies only to Kedify-owned material that Kedify deliberately
+publishes with this addendum and the Kedify Commercial Subscription License
+v1.0. It supplements version 1.0 of that license and is not an open-source
+license. Defined terms have the same meaning as in that license, and its
+warranty, liability, ownership and precedence provisions apply to these
+permissions. Both complete texts must accompany the covered material.
+
+Inspection. You may access, download, make private copies of and inspect the
+covered public source for internal technical and security review. You may make
+private modifications and compile the Software for that review and the
+permitted evaluation. Actual execution beyond the 30-day evaluation requires
+an active entitlement, except for tests solely necessary to prepare a
+contribution or investigate and responsibly report a defect. That exception
+does not permit using resulting recommendations or other outputs for your
+operations or another person's operations.
+
+Subscribed use. If your active Order covers the relevant product and features,
+you may compile and privately modify this public source and run the resulting
+Software for the production use authorized by that Order. A modification does
+not remove the subscription requirement or enlarge the Order's limits. Support
+for modified builds is included only if expressly agreed.
+
+Sharing and contributions. Preserve this addendum, the commercial license and
+all applicable third-party notices. You may view and fork the public
+repository on GitHub as permitted by GitHub's Terms of Service. You may
+publish modifications in such a fork solely to review changes, report defects
+or submit a contribution to Kedify, provided recipients receive the covered
+material under these same terms and you have authority to grant the necessary
+rights in your changes. No other general redistribution or sublicensing right
+is granted for the covered Software. Before accepting submitted code for
+inclusion, Kedify will require the relevant rights holder to sign a separate
+contribution agreement assigning the submitted original code to Kedify. This
+addendum does not authorize publishing private Kedify code, confidential
+information or customer data.
+
+No automatic conversion. The covered version does not automatically become
+open source at a future date. New releases may use different terms without
+withdrawing rights already granted for earlier versions. Third-party
+components and material previously obtained under an open-source grant retain
+their applicable rights.

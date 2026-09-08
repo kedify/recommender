@@ -1,3 +1,7 @@
+// Copyright Kedify Inc.
+// SPDX-License-Identifier: LicenseRef-Kedify-Commercial-1.0 AND LicenseRef-Kedify-Public-Source-1.0
+// See LICENSE, PUBLIC_SOURCE_LICENSE and NOTICE; earlier Apache grants remain valid.
+
 package analysis
 
 import (
