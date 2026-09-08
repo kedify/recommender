@@ -42,4 +42,12 @@ go test ./...
 
 ## License
 
-Licensed under the Apache License, Version 2.0. See [LICENSE](LICENSE).
+Kedify-owned material is offered under the [Kedify Commercial Subscription
+License 1.0](LICENSE) and [Public Source Addendum 1.0](PUBLIC_SOURCE_LICENSE).
+This is source-available software. Production use requires an active Kedify
+subscription covering Recommender, including when running locally or offline.
+The terms permit source inspection, private builds and a 30-day evaluation;
+subscribers may privately modify and compile covered source.
+
+Include both Kedify texts and applicable third-party notices in distributions.
+Submitted code requires a signed contribution assignment before acceptance.
