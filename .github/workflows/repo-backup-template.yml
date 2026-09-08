@@ -1,6 +1,6 @@
 # Reusable template workflow for backing up repositories to Google Cloud Storage
 # SOC 2 Compliance: Complete git repository backup using bare mirror clone preserving all branches, tags, and history
-# Required org secrets: GH_TOKEN (repo access), GCP_GH_BACKUP_SA_KEY (service account JSON key)
+# Required workflow-call secrets: GH_TOKEN (repository token) and GCP_SA_KEY (service account JSON key)
 
 #############################################################################################
 # WARNING:
