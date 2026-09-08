@@ -30,6 +30,7 @@ func NormalizePolicy(p Policy) (Policy, error) {
 	if p.CPU.Strategy != CPUStrategyMax && p.CPU.Strategy != CPUStrategyPercentile {
 		return Policy{}, fmt.Errorf("unsupported cpu.strategy %q", p.CPU.Strategy)
 	}
+	p.Memory.Strategy = MemoryStrategy(strings.ToLower(strings.TrimSpace(string(p.Memory.Strategy))))
 	if p.Memory.Strategy == "" {
 		p.Memory.Strategy = d.Memory.Strategy
 	}
@@ -138,7 +139,7 @@ func Analyze(in Input, p Policy) (Output, error) {
 	sort.Slice(containers, func(i, j int) bool { return targetKey(containers[i].Target) < targetKey(containers[j].Target) })
 	for i, c := range containers {
 		if i > 0 && targetKey(c.Target) == targetKey(containers[i-1].Target) {
-			return Output{}, fmt.Errorf("duplicate logical container target")
+			return Output{}, fmt.Errorf("duplicate logical container target %q", targetKey(c.Target))
 		}
 		c = selectReleaseSegment(in, c)
 		for _, r := range []Resource{ResourceMemory, ResourceCPU} {

@@ -39,6 +39,12 @@ func shortPolicy() Policy {
 	p.Evidence.MinimumSamples = 10
 	return p
 }
+func TestPolicyStrategyNormalization(t *testing.T) {
+	got, err := NormalizePolicy(Policy{CPU: CPUPolicy{Strategy: " Percentile "}, Memory: MemoryPolicy{Strategy: " Max "}})
+	if err != nil || !reflect.DeepEqual(got, DefaultPolicy()) {
+		t.Fatalf("strategy normalization changed the effective defaults: %+v, %v", got, err)
+	}
+}
 func run(t *testing.T, in Input, p Policy) Output {
 	t.Helper()
 	out, err := Analyze(in, p)

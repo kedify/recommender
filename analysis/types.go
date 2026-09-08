@@ -11,7 +11,8 @@ const (
 	ResourceRightSizeDetectorVersion = "2"
 )
 
-// All timestamps are original Unix milliseconds, never evaluation-step timestamps.
+// All timestamps are Unix milliseconds. Observation timestamps retain the source
+// time; evaluationTime and windowStart define the requested analysis window.
 type Input struct {
 	SchemaVersion  string                 `json:"schemaVersion"`
 	EvaluationTime int64                  `json:"evaluationTime"`
