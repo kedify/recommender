@@ -184,7 +184,7 @@ func analyzeResource(in Input, c ContainerObservation, r Resource, p Policy) (Re
 		addReason(q, ReasonMissingIdentity)
 	case identity.WorkloadUID != c.Target.WorkloadUID || identity.Release != c.Target.Release:
 		addReason(q, ReasonAmbiguousIdentity)
-	case stale(identity.Timestamp, in, p.Evidence):
+	case stale(identity.Timestamp, in, p.Evidence) || identity.Timestamp < identity.ReleaseStartedAt:
 		addReason(q, ReasonStaleIdentity)
 	}
 	if identity.ReleaseStartedAt <= 0 || identity.ReleaseStartedAt > in.EvaluationTime {

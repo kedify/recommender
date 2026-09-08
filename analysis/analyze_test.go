@@ -45,6 +45,19 @@ func TestPolicyStrategyNormalization(t *testing.T) {
 		t.Fatalf("strategy normalization changed the effective defaults: %+v, %v", got, err)
 	}
 }
+
+func TestIdentityBeforeReleaseBoundaryCannotAuthorizeSizing(t *testing.T) {
+	in := fixture(1200, 60)
+	in.Containers[0].Identity.ReleaseStartedAt = epoch + 600_000
+	in.Containers[0].Identity.Timestamp = epoch + 599_000
+	p := shortPolicy()
+	p.Evidence.FreshnessSeconds = 1200
+	for _, result := range run(t, in, p).Results {
+		if !has(result.DataQuality, ReasonStaleIdentity) || len(result.Recommendations) != 0 {
+			t.Fatalf("pre-release identity authorized sizing: %+v", result)
+		}
+	}
+}
 func run(t *testing.T, in Input, p Policy) Output {
 	t.Helper()
 	out, err := Analyze(in, p)
