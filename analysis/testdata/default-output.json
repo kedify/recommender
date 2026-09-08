@@ -1,18 +1,39 @@
 {
-  "schemaVersion": "resource-analysis-output/v1",
-  "detectorVersion": "1",
-  "policyVersion": "cpu=p95,h=3,r=5;mem=max,h=1.2,r=3",
+  "schemaVersion": "resource-analysis-output/v2",
+  "detectorVersion": "2",
+  "policyVersion": "v2:4ee0c63f2f57b6a5be6984cb78619879194d3200e9288b28c4a4bd247f4029d7",
   "effectivePolicy": {
     "cpu": {
       "strategy": "percentile",
-      "percentile": 95,
+      "percentile": 50,
       "headroomCoefficient": 3,
-      "limitsToRequestsRatio": 5
+      "limitsToRequestsRatio": 5,
+      "bounds": {
+        "minimum": 20,
+        "maximum": 64000,
+        "minimumAbsoluteChange": 50,
+        "minimumRelativeChange": 0.1
+      },
+      "requestsOnly": false
     },
     "memory": {
       "strategy": "max",
       "headroomCoefficient": 1.2,
-      "limitsToRequestsRatio": 3
+      "limitsToRequestsRatio": 3,
+      "bounds": {
+        "minimum": 10485760,
+        "maximum": 1099511627776,
+        "minimumAbsoluteChange": 8388608,
+        "minimumRelativeChange": 0.1
+      },
+      "requestsOnly": false
+    },
+    "evidence": {
+      "minimumHistorySeconds": 600,
+      "minimumSamples": 10,
+      "minimumCoverage": 0.9,
+      "maximumGapSeconds": 300,
+      "freshnessSeconds": 300
     }
   },
   "results": [
@@ -20,39 +41,143 @@
       "target": {
         "namespace": "shop",
         "kind": "Deployment",
-        "name": "checkout",
-        "container": "app"
+        "name": "api",
+        "container": "app",
+        "workloadUID": "uid",
+        "release": "A"
       },
       "resource": "memory",
       "recommendations": [
-        { "setting": "requests", "currentValue": 67108864, "suggestedValue": 31457280, "confidence": 95 },
-        { "setting": "limits", "currentValue": 134217728, "suggestedValue": 94371840, "confidence": 95 }
+        {
+          "setting": "requests",
+          "currentValue": 268435456,
+          "suggestedValue": 125829120,
+          "confidence": 95
+        },
+        {
+          "setting": "limits",
+          "currentValue": 536870912,
+          "suggestedValue": 377487360,
+          "confidence": 95
+        }
       ],
       "evidence": {
-        "aggregatedUsage": { "available": true, "value": 26214400 },
-        "currentRequest": { "available": true, "value": 67108864 },
-        "currentLimit": { "available": true, "value": 134217728 }
+        "aggregatedUsage": {
+          "available": true,
+          "value": 104857600,
+          "timestamp": 1800000600000
+        },
+        "currentRequest": {
+          "available": true,
+          "value": 268435456,
+          "timestamp": 1800000600000
+        },
+        "currentLimit": {
+          "available": true,
+          "value": 536870912,
+          "timestamp": 1800000600000
+        },
+        "identity": {
+          "available": true,
+          "workloadUID": "uid",
+          "release": "A",
+          "timestamp": 1800000600000,
+          "releaseStartedAt": 1800000000000,
+          "ambiguous": false,
+          "releaseStartInferred": false
+        },
+        "inventory": {
+          "available": true,
+          "timestamp": 1800000600000,
+          "eligible": 1,
+          "observed": 1,
+          "excluded": 0
+        }
       },
-      "dataQuality": { "status": "available", "observedIntervalHours": 168 }
+      "dataQuality": {
+        "status": "available",
+        "observedStart": 1800000000000,
+        "observedEnd": 1800000600000,
+        "sampleCount": 12,
+        "seriesCount": 1,
+        "cadenceSeconds": 60,
+        "gapCount": 0,
+        "maximumGapSeconds": 60,
+        "coverage": 1,
+        "observedIntervalHours": 0.16666666666666666,
+        "reasons": []
+      }
     },
     {
       "target": {
         "namespace": "shop",
         "kind": "Deployment",
-        "name": "checkout",
-        "container": "app"
+        "name": "api",
+        "container": "app",
+        "workloadUID": "uid",
+        "release": "A"
       },
       "resource": "cpu",
       "recommendations": [
-        { "setting": "requests", "currentValue": 250, "suggestedValue": 120, "confidence": 95 },
-        { "setting": "limits", "currentValue": 1000, "suggestedValue": 600, "confidence": 95 }
+        {
+          "setting": "requests",
+          "currentValue": 1000,
+          "suggestedValue": 150,
+          "confidence": 95
+        },
+        {
+          "setting": "limits",
+          "currentValue": 4000,
+          "suggestedValue": 750,
+          "confidence": 95
+        }
       ],
       "evidence": {
-        "aggregatedUsage": { "available": true, "value": 40 },
-        "currentRequest": { "available": true, "value": 250 },
-        "currentLimit": { "available": true, "value": 1000 }
+        "aggregatedUsage": {
+          "available": true,
+          "value": 50,
+          "timestamp": 1800000600000
+        },
+        "currentRequest": {
+          "available": true,
+          "value": 1000,
+          "timestamp": 1800000600000
+        },
+        "currentLimit": {
+          "available": true,
+          "value": 4000,
+          "timestamp": 1800000600000
+        },
+        "identity": {
+          "available": true,
+          "workloadUID": "uid",
+          "release": "A",
+          "timestamp": 1800000600000,
+          "releaseStartedAt": 1800000000000,
+          "ambiguous": false,
+          "releaseStartInferred": false
+        },
+        "inventory": {
+          "available": true,
+          "timestamp": 1800000600000,
+          "eligible": 1,
+          "observed": 1,
+          "excluded": 0
+        }
       },
-      "dataQuality": { "status": "available", "observedIntervalHours": 168 }
+      "dataQuality": {
+        "status": "available",
+        "observedStart": 1800000000000,
+        "observedEnd": 1800000600000,
+        "sampleCount": 11,
+        "seriesCount": 1,
+        "cadenceSeconds": 60,
+        "gapCount": 0,
+        "maximumGapSeconds": 60,
+        "coverage": 1,
+        "observedIntervalHours": 0.16666666666666666,
+        "reasons": []
+      }
     }
   ]
 }

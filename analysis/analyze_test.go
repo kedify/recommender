@@ -1,7 +1,6 @@
 // Copyright Kedify Inc.
 // SPDX-License-Identifier: LicenseRef-Kedify-Commercial-1.0 AND LicenseRef-Kedify-Public-Source-1.0
 // See LICENSE and PUBLIC_SOURCE_LICENSE.
-
 package analysis
 
 import (
@@ -9,453 +8,412 @@ import (
 	"math"
 	"os"
 	"reflect"
+	"strings"
 	"testing"
 )
 
-func TestGoldenDefaultPolicy(t *testing.T) {
-	inputBytes, err := os.ReadFile("testdata/default-input.json")
+const epoch int64 = 1800000000000
+
+func fixture(duration, step int64) Input {
+	end := epoch + duration*1000
+	c := ContainerObservation{Target: Target{Namespace: "shop", Kind: "Deployment", Name: "api", Container: "app", WorkloadUID: "uid", Release: "A"}, Identity: CurrentIdentity{Available: true, WorkloadUID: "uid", Release: "A", Timestamp: end, ReleaseStartedAt: epoch}, Inventory: Inventory{Available: true, Timestamp: end, Eligible: 1, Observed: 1}}
+	for _, r := range []*ResourceObservation{&c.CPU, &c.Memory} {
+		s := Series{ID: "pod-1", PodUID: "pod-1", WorkloadUID: "uid", Release: "A", Kind: SampleGauge}
+		for sec := int64(0); sec <= duration; sec += step {
+			s.Samples = append(s.Samples, Sample{Timestamp: epoch + sec*1000, Value: 10})
+		}
+		r.Series = []Series{s}
+		r.CurrentRequest = Signal{Available: true, Timestamp: end, Value: 1000}
+		r.CurrentLimit = Signal{Available: true, Timestamp: end, Value: 4000}
+	}
+	for i := range c.Memory.Series[0].Samples {
+		c.Memory.Series[0].Samples[i].Value = 20 * 1024 * 1024
+	}
+	c.Memory.CurrentRequest.Value = 256 * 1024 * 1024
+	c.Memory.CurrentLimit.Value = 512 * 1024 * 1024
+	return Input{SchemaVersion: InputSchemaVersion, WindowStart: epoch, EvaluationTime: end, Containers: []ContainerObservation{c}}
+}
+func shortPolicy() Policy {
+	p := DefaultPolicy()
+	p.Evidence.MinimumHistorySeconds = 600
+	p.Evidence.MinimumSamples = 10
+	return p
+}
+func run(t *testing.T, in Input, p Policy) Output {
+	t.Helper()
+	out, err := Analyze(in, p)
 	if err != nil {
 		t.Fatal(err)
 	}
+	return out
+}
+func has(q DataQuality, r Reason) bool {
+	for _, x := range q.Reasons {
+		if x == r {
+			return true
+		}
+	}
+	return false
+}
+func TestRawOffGridPeakAndCPUPercentile(t *testing.T) {
+	in := fixture(600, 60)
+	c := &in.Containers[0]
+	c.Memory.Series[0].Samples = append(c.Memory.Series[0].Samples, Sample{Timestamp: epoch + 233127, Value: 100 * 1024 * 1024})
+	for i := range c.CPU.Series[0].Samples {
+		c.CPU.Series[0].Samples[i].Value = float64(i * 10)
+	}
+	p := shortPolicy()
+	p.CPU.Percentile = 50
+	out := run(t, in, p)
+	if out.Results[0].Evidence.AggregatedUsage.Value != 100*1024*1024 || out.Results[1].Evidence.AggregatedUsage.Value != 50 {
+		t.Fatalf("raw peak/percentile lost: %+v", out.Results)
+	}
+	aligned := in
+	aligned.EvaluationTime += 15000
+	if got := run(t, aligned, p); got.Results[0].Evidence.AggregatedUsage != out.Results[0].Evidence.AggregatedUsage || got.Results[1].Evidence.AggregatedUsage != out.Results[1].Evidence.AggregatedUsage {
+		t.Fatal("evaluation alignment changed aggregation")
+	}
+	// A JSON/offline source produces byte-identical output from equivalent raw input.
+	b, _ := json.Marshal(in)
 	var decoded Input
-	if err := json.Unmarshal(inputBytes, &decoded); err != nil {
+	if err := json.Unmarshal(b, &decoded); err != nil {
 		t.Fatal(err)
 	}
-
-	programmatic := Input{
-		SchemaVersion:         InputSchemaVersion,
-		ObservedIntervalHours: 168,
-		Containers: []ContainerObservation{{
-			Target: Target{Namespace: "shop", Kind: "Deployment", Name: "checkout", Container: "app"},
-			Memory: ResourceObservation{
-				AggregatedUsage: available(25 * 1024 * 1024),
-				CurrentRequest:  available(64 * 1024 * 1024),
-				CurrentLimit:    available(128 * 1024 * 1024),
-			},
-			CPU: ResourceObservation{
-				AggregatedUsage: available(40),
-				CurrentRequest:  available(250),
-				CurrentLimit:    available(1000),
-			},
-		}},
+	if got := run(t, decoded, p); !reflect.DeepEqual(out, got) {
+		t.Fatal("offline/connected normalized results differ")
 	}
-	if !reflect.DeepEqual(decoded, programmatic) {
-		t.Fatalf("decoded fixture differs from programmatic input\ndecoded: %#v\nprogrammatic: %#v", decoded, programmatic)
+}
+func TestWeeklyDefaultAndMeasuredCoverage(t *testing.T) {
+	tests := []struct {
+		name   string
+		in     Input
+		reason Reason
+	}{{"three quiet days", fixture(3*86400, 60), ReasonInsufficientHistory}, {"sparse week", fixture(7*86400, 86400), ReasonInsufficientSamples}, {"stable week", fixture(7*86400, 60), ""}}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			out := run(t, tt.in, Policy{})
+			for _, r := range out.Results {
+				if tt.reason != "" {
+					if !has(r.DataQuality, tt.reason) || len(r.Recommendations) > 0 {
+						t.Fatalf("unsafe short/sparse advice: %+v", r)
+					}
+				} else {
+					if len(r.Recommendations) == 0 || r.Recommendations[0].Confidence > 95 {
+						t.Fatalf("stable week should size with capped confidence: %+v", r)
+					}
+				}
+			}
+		})
 	}
+	in := fixture(7*86400, 60)
+	s := &in.Containers[0].CPU.Series[0]
+	s.Samples = s.Samples[len(s.Samples)-20:]
+	out := run(t, in, Policy{})
+	if out.Results[1].DataQuality.Coverage > .01 || !has(out.Results[1].DataQuality, ReasonInsufficientHistory) || len(out.Results[0].Recommendations) == 0 {
+		t.Fatal("requested lookback substituted for observed CPU history or memory blocked")
+	}
+}
+func TestReleaseIdentityPartitions(t *testing.T) {
+	for _, mode := range []string{"old-new", "rollback", "recreated", "mixed", "stale-identity", "mismatch", "unknown"} {
+		t.Run(mode, func(t *testing.T) {
+			in := fixture(600, 60)
+			c := &in.Containers[0]
+			foreign := c.CPU.Series[0]
+			foreign.ID = "foreign"
+			foreign.Samples = []Sample{{Timestamp: epoch + 300000, Value: 999999}}
+			foreign.Release = "B"
+			switch mode {
+			case "old-new":
+				foreign.Samples[0].Timestamp = epoch - 60000
+				c.CPU.Series = append(c.CPU.Series, foreign)
+			case "rollback":
+				c.Identity.ReleaseStartedAt = 0
+				c.CPU.Series = append(c.CPU.Series, foreign)
+			case "recreated":
+				foreign.WorkloadUID = "old-uid"
+				foreign.Release = "A"
+				c.CPU.Series = append(c.CPU.Series, foreign)
+			case "mixed":
+				c.Identity.Ambiguous = true
+			case "stale-identity":
+				c.Identity.Timestamp = epoch
+			case "mismatch":
+				c.Identity.Release = "B"
+			case "unknown":
+				c.Identity.Available = false
+			}
+			out := run(t, in, shortPolicy())
+			r := out.Results[1]
+			if mode == "old-new" || mode == "recreated" {
+				if r.Evidence.AggregatedUsage.Value != 10 || len(r.Recommendations) == 0 {
+					t.Fatalf("identity filtering failed %+v", r)
+				}
+			} else if len(r.Recommendations) > 0 || r.NoActionReason == "" {
+				t.Fatalf("unsafe identity advice %+v", r)
+			}
+			if mode == "rollback" && (r.DataQuality.ObservedStart <= epoch+300000 || !has(r.DataQuality, ReasonInsufficientHistory)) {
+				t.Fatal("rollback pooled prior A")
+			}
+		})
+	}
+}
+func TestObservedSegmentInference(t *testing.T) {
+	in := fixture(600, 60)
+	in.Containers[0].Identity.ReleaseStartedAt = 0
+	out := run(t, in, shortPolicy())
+	r := out.Results[1]
+	if !r.Evidence.Identity.ReleaseStartInferred || !has(r.DataQuality, ReasonInferredReleaseStart) || len(r.Recommendations) == 0 {
+		t.Fatalf("missing conservative segment inference %+v", r)
+	}
+}
+func TestStaleGapsDuplicatesAndFreshSignals(t *testing.T) {
+	for _, mode := range []string{"stale", "gap", "duplicates", "request", "limit"} {
+		t.Run(mode, func(t *testing.T) {
+			in := fixture(1200, 60)
+			s := &in.Containers[0].CPU.Series[0]
+			switch mode {
+			case "stale":
+				s.Samples = s.Samples[:5]
+			case "gap":
+				s.Samples = append(s.Samples[:5], s.Samples[15:]...)
+			case "duplicates":
+				s.Samples = []Sample{s.Samples[0], s.Samples[0], s.Samples[0], s.Samples[0]}
+			case "request":
+				in.Containers[0].CPU.CurrentRequest.Timestamp = epoch
+			case "limit":
+				in.Containers[0].CPU.CurrentLimit.Timestamp = epoch
+			}
+			r := run(t, in, shortPolicy()).Results[1]
+			if mode == "limit" {
+				if !has(r.DataQuality, ReasonStaleLimit) || len(r.Recommendations) != 1 || r.Recommendations[0].Setting != SettingRequests {
+					t.Fatalf("stale limit handling %+v", r)
+				}
+			} else if len(r.Recommendations) > 0 || r.NoActionReason == "" {
+				t.Fatalf("unsafe quality %+v", r)
+			}
+			if mode == "duplicates" && r.DataQuality.SampleCount != 1 {
+				t.Fatal("duplicate/carried timestamp counted as new observation")
+			}
+			if mode == "gap" && (!has(r.DataQuality, ReasonInterruptedHistory) || r.DataQuality.GapCount == 0 || r.DataQuality.Coverage >= .9) {
+				t.Fatalf("gap hidden: %+v", r.DataQuality)
+			}
+		})
+	}
+}
+func TestInventoryCannotDisappear(t *testing.T) {
+	for _, mode := range []string{"unknown", "excluded", "crashloop", "resource-missing", "stale"} {
+		t.Run(mode, func(t *testing.T) {
+			in := fixture(600, 60)
+			c := &in.Containers[0]
+			switch mode {
+			case "unknown":
+				c.Inventory = Inventory{}
+			case "excluded":
+				c.Inventory.Excluded = 3
+			case "crashloop":
+				c.Inventory.Eligible = 2
+			case "resource-missing":
+				c.Inventory.Eligible = 2
+				c.Inventory.Observed = 2
+			case "stale":
+				c.Inventory.Timestamp = epoch
+			}
+			r := run(t, in, shortPolicy()).Results[1]
+			if len(r.Recommendations) > 0 || r.NoActionReason == "" {
+				t.Fatalf("unknown/excluded authorized downsize: %+v", r)
+			}
+			// Well-covered high usage may still justify growth, but quality stays partial.
+			for i := range c.CPU.Series[0].Samples {
+				c.CPU.Series[0].Samples[i].Value = 1000
+			}
+			r = run(t, in, shortPolicy()).Results[1]
+			if len(r.Recommendations) == 0 || r.DataQuality.Status != DataQualityPartial {
+				t.Fatalf("safe growth should retain uncertainty: %+v", r)
+			}
+		})
+	}
+}
+func TestCounterNormalizationAndReplicaConservatism(t *testing.T) {
+	gauge := fixture(600, 60)
+	counter := fixture(600, 60)
+	s := &counter.Containers[0].CPU.Series[0]
+	s.Kind = SampleCPUCounterSeconds
+	for i := range s.Samples {
+		s.Samples[i].Value = float64(i) * .6
+	}
+	// Counter reset: at t=360, .6 seconds accrued after a restart.
+	for i := 6; i < len(s.Samples); i++ {
+		s.Samples[i].Value = float64(i-5) * .6
+	}
+	a, b := run(t, gauge, shortPolicy()).Results[1], run(t, counter, shortPolicy()).Results[1]
+	if math.Abs(a.Evidence.AggregatedUsage.Value-b.Evidence.AggregatedUsage.Value) > 1e-10 || len(b.Recommendations) == 0 {
+		t.Fatalf("counter/gauge differ: %+v %+v", a, b)
+	}
+	busy := gauge.Containers[0].CPU.Series[0]
+	busy.ID = "busy"
+	busy.PodUID = "busy"
+	busy.Samples = append([]Sample(nil), busy.Samples...)
+	for i := range busy.Samples {
+		busy.Samples[i].Value = 200
+	}
+	gauge.Containers[0].CPU.Series = append(gauge.Containers[0].CPU.Series, busy)
+	gauge.Containers[0].Inventory.Eligible = 2
+	gauge.Containers[0].Inventory.Observed = 2
+	if r := run(t, gauge, shortPolicy()).Results[1]; r.Evidence.AggregatedUsage.Value != 200 {
+		t.Fatalf("busy replica diluted %+v", r)
+	}
+}
+func TestZeroMissingBoundsAndIndependentSettings(t *testing.T) {
+	in := fixture(600, 60)
+	c := &in.Containers[0]
+	for i := range c.CPU.Series[0].Samples {
+		c.CPU.Series[0].Samples[i].Value = 0
+	}
+	r := run(t, in, shortPolicy()).Results[1]
+	if !r.Evidence.AggregatedUsage.Available || r.Evidence.AggregatedUsage.Value != 0 || r.Recommendations[0].SuggestedValue != 20 {
+		t.Fatalf("zero is not observed idle %+v", r)
+	}
+	c.CPU.Series = nil
+	r = run(t, in, shortPolicy()).Results[1]
+	if r.Evidence.AggregatedUsage.Available || r.NoActionReason != ReasonMissingUsage {
+		t.Fatalf("missing converted to idle %+v", r)
+	}
+	in = fixture(600, 60)
+	in.Containers[0].CPU.CurrentRequest.Value = 30
+	in.Containers[0].CPU.CurrentLimit.Value = 500
+	r = run(t, in, shortPolicy()).Results[1]
+	if len(r.Recommendations) != 1 || r.Recommendations[0].Setting != SettingLimits {
+		t.Fatalf("limit change wrongly coupled to request delta %+v", r)
+	}
+	p := shortPolicy()
+	p.CPU.Bounds.Maximum = 100
+	in.Containers[0].CPU.Series[0].Samples[0].Value = 10000
+	p.CPU.Strategy = CPUStrategyMax
+	r = run(t, in, p).Results[1]
+	for _, rec := range r.Recommendations {
+		if rec.SuggestedValue > 100 {
+			t.Fatal("bound exceeded")
+		}
+	}
+}
+func TestDeterminismAndValidation(t *testing.T) {
+	in := fixture(600, 60)
+	before, _ := json.Marshal(in)
+	out := run(t, in, shortPolicy())
+	after, _ := json.Marshal(in)
+	if string(before) != string(after) {
+		t.Fatal("input mutated")
+	}
+	for _, r := range []*ResourceObservation{&in.Containers[0].CPU, &in.Containers[0].Memory} {
+		s := r.Series[0].Samples
+		for i, j := 0, len(s)-1; i < j; i, j = i+1, j-1 {
+			s[i], s[j] = s[j], s[i]
+		}
+	}
+	if got := run(t, in, shortPolicy()); !reflect.DeepEqual(out, got) {
+		t.Fatal("sample order affects output")
+	}
+	in.SchemaVersion = "resource-analysis-input/v1"
+	if _, err := Analyze(in, Policy{}); err == nil || !strings.Contains(err.Error(), "unsupported input schema") {
+		t.Fatal("v1 was accepted")
+	}
+	if _, err := NormalizePolicy(Policy{CPU: CPUPolicy{Bounds: Bounds{Minimum: 100, Maximum: 50}}}); err == nil {
+		t.Fatal("invalid bounds accepted")
+	}
+	in = fixture(600, 60)
+	in.Containers[0].CPU.Series[0].Samples[0].Value = math.NaN()
+	if _, err := Analyze(in, shortPolicy()); err == nil {
+		t.Fatal("NaN accepted")
+	}
+}
 
-	got, err := Analyze(decoded, Policy{})
+func TestGoldenNormalizedSnapshot(t *testing.T) {
+	b, err := os.ReadFile("testdata/default-input.json")
 	if err != nil {
 		t.Fatal(err)
 	}
-	gotAgain, err := Analyze(programmatic, Policy{})
-	if err != nil {
+	var in Input
+	if err = json.Unmarshal(b, &in); err != nil {
 		t.Fatal(err)
 	}
-	if !reflect.DeepEqual(got, gotAgain) {
-		t.Fatal("same normalized snapshot and policy produced different output")
-	}
-
-	wantBytes, err := os.ReadFile("testdata/default-output.json")
+	p := shortPolicy()
+	p.CPU.Percentile = 50
+	out := run(t, in, p)
+	b, err = os.ReadFile("testdata/default-output.json")
 	if err != nil {
 		t.Fatal(err)
 	}
 	var want Output
-	if err := json.Unmarshal(wantBytes, &want); err != nil {
+	if err = json.Unmarshal(b, &want); err != nil {
 		t.Fatal(err)
 	}
-	if !reflect.DeepEqual(got, want) {
-		gotJSON, _ := json.MarshalIndent(got, "", "  ")
-		t.Fatalf("golden output mismatch\ngot:\n%s", gotJSON)
+	if !reflect.DeepEqual(out, want) {
+		t.Fatalf("golden output mismatch: %+v", out)
 	}
 }
-
-func TestPolicyVersionMatchesDashboardIdentity(t *testing.T) {
-	tests := []struct {
-		name   string
-		policy Policy
-		want   string
-	}{
-		{
-			name: "defaults",
-			want: "cpu=p95,h=3,r=5;mem=max,h=1.2,r=3",
-		},
-		{
-			name: "custom max",
-			policy: Policy{
-				CPU:    CPUPolicy{Strategy: CPUStrategyMax, HeadroomCoefficient: 2.5, LimitsToRequestsRatio: 4},
-				Memory: MemoryPolicy{Strategy: MemoryStrategyMax, HeadroomCoefficient: 1.4, LimitsToRequestsRatio: 2},
-			},
-			want: "cpu=max,h=2.5,r=4;mem=max,h=1.4,r=2",
-		},
+func TestUnknownSeriesAndLimitSafety(t *testing.T) {
+	in := fixture(600, 60)
+	unknown := in.Containers[0].CPU.Series[0]
+	unknown.ID = "unidentified"
+	unknown.Release = ""
+	in.Containers[0].CPU.Series = append(in.Containers[0].CPU.Series, unknown)
+	r := run(t, in, shortPolicy()).Results[1]
+	if !has(r.DataQuality, ReasonUnknownSeriesIdentity) || len(r.Recommendations) > 0 {
+		t.Fatal("unknown series hidden")
 	}
-
-	for _, test := range tests {
-		t.Run(test.name, func(t *testing.T) {
-			got, err := PolicyVersion(test.policy)
-			if err != nil {
-				t.Fatal(err)
-			}
-			if got != test.want {
-				t.Fatalf("PolicyVersion() = %q, want %q", got, test.want)
-			}
-		})
+	in = fixture(600, 60)
+	in.Containers[0].CPU.CurrentLimit.Value = 0
+	in.Containers[0].Inventory.Available = false
+	r = run(t, in, shortPolicy()).Results[1]
+	if len(r.Recommendations) > 0 {
+		t.Fatal("unknown inventory tightened unlimited resource")
 	}
-}
-
-func TestNormalizePolicyRejectsLimitRatiosBelowOne(t *testing.T) {
-	tests := []struct {
-		name   string
-		policy Policy
-		want   string
-	}{
-		{
-			name:   "CPU",
-			policy: Policy{CPU: CPUPolicy{LimitsToRequestsRatio: 0.9}},
-			want:   "cpu.limitsToRequestsRatio must be greater than or equal to 1",
-		},
-		{
-			name:   "memory",
-			policy: Policy{Memory: MemoryPolicy{LimitsToRequestsRatio: 0.9}},
-			want:   "memory.limitsToRequestsRatio must be greater than or equal to 1",
-		},
-	}
-	for _, test := range tests {
-		t.Run(test.name, func(t *testing.T) {
-			_, err := NormalizePolicy(test.policy)
-			if err == nil || err.Error() != test.want {
-				t.Fatalf("NormalizePolicy() error = %v, want %q", err, test.want)
-			}
-		})
-	}
-}
-
-func TestCustomPolicy(t *testing.T) {
-	input := Input{
-		SchemaVersion:         InputSchemaVersion,
-		ObservedIntervalHours: 24,
-		Containers: []ContainerObservation{{
-			Target: Target{Namespace: "shop", Kind: "StatefulSet", Name: "worker", Container: "worker"},
-			CPU: ResourceObservation{
-				AggregatedUsage: available(50),
-				CurrentRequest:  available(200),
-				CurrentLimit:    available(500),
-			},
-			Memory: ResourceObservation{
-				AggregatedUsage: available(20 * 1024 * 1024),
-				CurrentRequest:  available(64 * 1024 * 1024),
-				CurrentLimit:    available(100 * 1024 * 1024),
-			},
-		}},
-	}
-	policy := Policy{
-		CPU:    CPUPolicy{Strategy: CPUStrategyMax, HeadroomCoefficient: 2, LimitsToRequestsRatio: 4},
-		Memory: MemoryPolicy{Strategy: MemoryStrategyMax, HeadroomCoefficient: 1.5, LimitsToRequestsRatio: 2},
-	}
-
-	got, err := Analyze(input, policy)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if got.EffectivePolicy.CPU.Strategy != CPUStrategyMax || got.EffectivePolicy.CPU.Percentile != 0 {
-		t.Fatalf("unexpected effective CPU strategy: %#v", got.EffectivePolicy.CPU)
-	}
-	assertRecommendation(t, got.Results[0], SettingRequests, 64*1024*1024, 30*1024*1024)
-	assertRecommendation(t, got.Results[0], SettingLimits, 100*1024*1024, 60*1024*1024)
-	assertRecommendation(t, got.Results[1], SettingRequests, 200, 100)
-	assertRecommendation(t, got.Results[1], SettingLimits, 500, 400)
-}
-
-func TestMinimumValues(t *testing.T) {
-	input := Input{
-		SchemaVersion:         InputSchemaVersion,
-		ObservedIntervalHours: 1,
-		Containers: []ContainerObservation{{
-			Target: Target{Namespace: "shop", Kind: "Deployment", Name: "idle", Container: "idle"},
-			CPU: ResourceObservation{
-				AggregatedUsage: available(1),
-				CurrentRequest:  available(100),
-				CurrentLimit:    available(200),
-			},
-			Memory: ResourceObservation{
-				AggregatedUsage: available(1),
-				CurrentRequest:  available(20 * 1024 * 1024),
-				CurrentLimit:    available(40 * 1024 * 1024),
-			},
-		}},
-	}
-
-	got, err := Analyze(input, Policy{})
-	if err != nil {
-		t.Fatal(err)
-	}
-	assertRecommendation(t, got.Results[0], SettingRequests, 20*1024*1024, minimumMemoryBytes)
-	assertRecommendation(t, got.Results[1], SettingRequests, 100, minimumCPUMillicores)
-}
-
-func TestChangeThresholdsMatchCurrentDetector(t *testing.T) {
-	fixture, err := os.ReadFile("testdata/legacy-boundaries.json")
-	if err != nil {
-		t.Fatal(err)
-	}
-	var tests []struct {
-		Name                  string  `json:"name"`
-		Current               float64 `json:"current"`
-		Suggested             float64 `json:"suggested"`
-		MinimumAbsoluteChange float64 `json:"minimumAbsoluteChange"`
-		Want                  bool    `json:"recommend"`
-	}
-	if err := json.Unmarshal(fixture, &tests); err != nil {
-		t.Fatal(err)
-	}
-	for _, test := range tests {
-		t.Run(test.Name, func(t *testing.T) {
-			if got := isMaterialChange(test.Current, test.Suggested, test.MinimumAbsoluteChange); got != test.Want {
-				t.Fatalf("isMaterialChange(%v, %v, %v) = %t, want %t", test.Current, test.Suggested, test.MinimumAbsoluteChange, got, test.Want)
-			}
-		})
-	}
-}
-
-func TestConfidenceMatchesCurrentDetector(t *testing.T) {
-	tests := []struct {
-		hours int
-		want  int
-	}{
-		{hours: 1, want: 20},
-		{hours: 100, want: 56},
-		{hours: 168, want: 95},
-		{hours: 200, want: 113},
-	}
-	for _, test := range tests {
-		if got := recommendationConfidence(test.hours); got != test.want {
-			t.Errorf("recommendationConfidence(%d) = %d, want %d", test.hours, got, test.want)
+	in = fixture(600, 60)
+	in.Containers[0].CPU.CurrentRequest.Value = 120
+	p := shortPolicy()
+	p.CPU.Bounds.Minimum = 100
+	p.CPU.Bounds.Maximum = 100
+	r = run(t, in, p).Results[1]
+	for _, rec := range r.Recommendations {
+		if rec.Setting == SettingLimits && rec.SuggestedValue < 120 {
+			t.Fatal("limit fell below retained request")
 		}
 	}
 }
 
-func TestMissingSignalsAreTypedAndDoNotBecomeZeroRecommendations(t *testing.T) {
-	input := Input{
-		SchemaVersion:         InputSchemaVersion,
-		ObservedIntervalHours: 24,
-		Containers: []ContainerObservation{{
-			Target: Target{Namespace: "shop", Kind: "DaemonSet", Name: "collector", Container: "collector"},
-			CPU: ResourceObservation{
-				CurrentLimit: Signal{},
-			},
-			Memory: ResourceObservation{
-				AggregatedUsage: available(20 * 1024 * 1024),
-				CurrentRequest:  available(64 * 1024 * 1024),
-			},
-		}},
-	}
-
-	got, err := Analyze(input, Policy{})
-	if err != nil {
-		t.Fatal(err)
-	}
-	memory, cpu := got.Results[0], got.Results[1]
-	if memory.DataQuality.Status != DataQualityPartial || !reflect.DeepEqual(memory.DataQuality.MissingSignals, []SignalName{SignalCurrentLimit}) {
-		t.Fatalf("unexpected memory quality: %#v", memory.DataQuality)
-	}
-	if len(memory.Recommendations) != 1 || memory.Recommendations[0].Setting != SettingRequests {
-		t.Fatalf("missing current limit must only allow a request recommendation: %#v", memory.Recommendations)
-	}
-	if cpu.DataQuality.Status != DataQualityUnavailable || !reflect.DeepEqual(cpu.DataQuality.MissingSignals, []SignalName{SignalAggregatedUsage, SignalCurrentRequest, SignalCurrentLimit}) {
-		t.Fatalf("unexpected CPU quality: %#v", cpu.DataQuality)
-	}
-	if len(cpu.Recommendations) != 0 {
-		t.Fatalf("missing usage emitted numeric recommendations: %#v", cpu.Recommendations)
-	}
-}
-
-func TestMissingLimitIsPartialWhenRequestChangeIsMinor(t *testing.T) {
-	input := Input{
-		SchemaVersion:         InputSchemaVersion,
-		ObservedIntervalHours: 24,
-		Containers: []ContainerObservation{{
-			Target: Target{Namespace: "shop", Kind: "Deployment", Name: "api", Container: "api"},
-			CPU: ResourceObservation{
-				AggregatedUsage: available(100),
-				CurrentRequest:  available(300),
-			},
-			Memory: ResourceObservation{
-				AggregatedUsage: available(20 * 1024 * 1024),
-				CurrentRequest:  available(24 * 1024 * 1024),
-			},
-		}},
-	}
-
-	got, err := Analyze(input, Policy{})
-	if err != nil {
-		t.Fatal(err)
-	}
-	for _, result := range got.Results {
-		if result.DataQuality.Status != DataQualityPartial || !reflect.DeepEqual(result.DataQuality.MissingSignals, []SignalName{SignalCurrentLimit}) {
-			t.Fatalf("unexpected quality for %s: %#v", result.Resource, result.DataQuality)
-		}
-		if len(result.Recommendations) != 0 {
-			t.Fatalf("expected minor %s request change to emit no recommendation: %#v", result.Resource, result.Recommendations)
-		}
-	}
-}
-
-func TestInputOrderDoesNotAffectOutputOrMutateInput(t *testing.T) {
-	first := missingObservation("zeta")
-	second := missingObservation("alpha")
-	input := Input{
-		SchemaVersion:         InputSchemaVersion,
-		ObservedIntervalHours: 1,
-		Containers:            []ContainerObservation{first, second},
-	}
-	reversed := input
-	reversed.Containers = []ContainerObservation{second, first}
-
-	got, err := Analyze(input, Policy{})
-	if err != nil {
-		t.Fatal(err)
-	}
-	gotReversed, err := Analyze(reversed, Policy{})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if !reflect.DeepEqual(got, gotReversed) {
-		t.Fatalf("input order changed output\nfirst: %#v\nreversed: %#v", got, gotReversed)
-	}
-	if input.Containers[0].Target.Name != "zeta" {
-		t.Fatalf("Analyze mutated caller input: %#v", input.Containers)
-	}
-}
-
-func TestUnavailableSignalsAreCanonicalizedWithoutMutatingInput(t *testing.T) {
-	input := Input{
-		SchemaVersion:         InputSchemaVersion,
-		ObservedIntervalHours: 1,
-		Containers: []ContainerObservation{{
-			Target: Target{Namespace: "shop", Kind: "Deployment", Name: "api", Container: "api"},
-			CPU: ResourceObservation{
-				AggregatedUsage: Signal{Value: math.NaN()},
-				CurrentRequest:  Signal{Value: math.Inf(1)},
-				CurrentLimit:    Signal{Value: -1},
-			},
-		}},
-	}
-
-	got, err := Analyze(input, Policy{})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if !math.IsNaN(input.Containers[0].CPU.AggregatedUsage.Value) {
-		t.Fatal("Analyze mutated the caller's unavailable signal")
-	}
-	cpu := got.Results[1]
-	if cpu.Evidence.AggregatedUsage.Value != 0 || cpu.Evidence.CurrentRequest.Value != 0 || cpu.Evidence.CurrentLimit.Value != 0 {
-		t.Fatalf("unavailable signals are not canonical: %#v", cpu.Evidence)
-	}
-	if _, err := json.Marshal(got); err != nil {
-		t.Fatalf("canonical output is not valid JSON: %v", err)
-	}
-}
-
-func TestAnalyzeRejectsArithmeticOverflow(t *testing.T) {
-	tests := []struct {
-		name   string
-		cpu    ResourceObservation
-		policy Policy
-		want   string
-	}{
-		{
-			name: "request",
-			cpu: ResourceObservation{
-				AggregatedUsage: available(math.MaxFloat64),
-				CurrentRequest:  available(100),
-				CurrentLimit:    available(1000),
-			},
-			policy: Policy{CPU: CPUPolicy{HeadroomCoefficient: 2, LimitsToRequestsRatio: 1}},
-			want:   "containers[0]: cpu suggested request is not finite",
-		},
-		{
-			name: "limit",
-			cpu: ResourceObservation{
-				AggregatedUsage: available(math.MaxFloat64 / 4),
-				CurrentRequest:  available(math.MaxFloat64),
-				CurrentLimit:    available(math.MaxFloat64),
-			},
-			policy: Policy{CPU: CPUPolicy{HeadroomCoefficient: 2, LimitsToRequestsRatio: 3}},
-			want:   "containers[0]: cpu suggested limit is not finite",
-		},
-	}
-	for _, test := range tests {
-		t.Run(test.name, func(t *testing.T) {
-			input := Input{
-				SchemaVersion:         InputSchemaVersion,
-				ObservedIntervalHours: 1,
-				Containers: []ContainerObservation{{
-					Target: Target{Namespace: "shop", Kind: "Deployment", Name: "api", Container: "api"},
-					CPU:    test.cpu,
-				}},
+func TestStableReleaseSurvivesReplicaChurn(t *testing.T) {
+	for _, replacement := range []bool{false, true} {
+		t.Run(map[bool]string{false: "scale out", true: "replacement"}[replacement], func(t *testing.T) {
+			in := fixture(7*86400, 60)
+			c := &in.Containers[0]
+			for _, obs := range []*ResourceObservation{&c.CPU, &c.Memory} {
+				recent := obs.Series[0]
+				recent.ID = "new-pod"
+				recent.PodUID = "new-pod"
+				recent.Samples = append([]Sample(nil), recent.Samples[len(recent.Samples)-31:]...)
+				if replacement {
+					obs.Series[0].Samples = obs.Series[0].Samples[:len(obs.Series[0].Samples)-30]
+				}
+				obs.Series = append(obs.Series, recent)
 			}
-			got, err := Analyze(input, test.policy)
-			if err == nil || err.Error() != test.want {
-				t.Fatalf("Analyze() error = %v, want %q", err, test.want)
+			if !replacement {
+				c.Inventory.Eligible = 2
+				c.Inventory.Observed = 2
 			}
-			if !reflect.DeepEqual(got, Output{}) {
-				t.Fatalf("Analyze() returned partial output on overflow: %#v", got)
+			out := run(t, in, Policy{})
+			for _, r := range out.Results {
+				if len(r.Recommendations) == 0 || r.Recommendations[0].Confidence != 95 || r.DataQuality.Coverage != 1 {
+					t.Fatalf("healthy churn erased release history: %+v", r)
+				}
+			}
+			for i := range c.CPU.Series[1].Samples {
+				c.CPU.Series[1].Samples[i].Value = 1000
+			}
+			c.Inventory.Available = false
+			r := run(t, in, Policy{}).Results[1]
+			if len(r.Recommendations) == 0 || r.Recommendations[0].SuggestedValue != 3000 {
+				t.Fatalf("new replica peak cannot grow stable release %+v", r)
 			}
 		})
 	}
-}
-
-func TestAnalyzeErrorsUseOriginalContainerIndex(t *testing.T) {
-	input := Input{
-		SchemaVersion:         InputSchemaVersion,
-		ObservedIntervalHours: 1,
-		Containers: []ContainerObservation{
-			{
-				Target: Target{Namespace: "z-last", Kind: "Deployment", Name: "api"},
-			},
-			missingObservation("valid"),
-		},
-	}
-
-	_, err := Analyze(input, Policy{})
-	want := "containers[0]: target namespace, kind, name, and container are required"
-	if err == nil || err.Error() != want {
-		t.Fatalf("Analyze() error = %v, want %q", err, want)
-	}
-}
-
-func TestRejectsInvalidInputAndPolicy(t *testing.T) {
-	valid := Input{SchemaVersion: InputSchemaVersion, ObservedIntervalHours: 1}
-
-	invalidVersion := valid
-	invalidVersion.SchemaVersion = "v2"
-	if _, err := Analyze(invalidVersion, Policy{}); err == nil {
-		t.Fatal("expected unsupported schema version error")
-	}
-	if _, err := Analyze(valid, Policy{CPU: CPUPolicy{Strategy: CPUStrategyPercentile, Percentile: 100}}); err == nil {
-		t.Fatal("expected invalid CPU percentile error")
-	}
-}
-
-func available(value float64) Signal {
-	return Signal{Available: true, Value: value}
-}
-
-func missingObservation(name string) ContainerObservation {
-	return ContainerObservation{
-		Target: Target{Namespace: "shop", Kind: "Deployment", Name: name, Container: "app"},
-	}
-}
-
-func assertRecommendation(t *testing.T, result ResourceAnalysis, setting Setting, current, suggested float64) {
-	t.Helper()
-	for _, recommendation := range result.Recommendations {
-		if recommendation.Setting == setting {
-			if recommendation.CurrentValue != current || recommendation.SuggestedValue != suggested {
-				t.Fatalf("unexpected %s recommendation: %#v", setting, recommendation)
-			}
-			return
-		}
-	}
-	t.Fatalf("missing %s recommendation in %#v", setting, result.Recommendations)
 }

@@ -1,23 +1,168 @@
 {
-  "schemaVersion": "resource-analysis-input/v1",
-  "observedIntervalHours": 168,
+  "schemaVersion": "resource-analysis-input/v2",
+  "evaluationTime": 1800000600000,
+  "windowStart": 1800000000000,
   "containers": [
     {
       "target": {
         "namespace": "shop",
         "kind": "Deployment",
-        "name": "checkout",
-        "container": "app"
+        "name": "api",
+        "container": "app",
+        "workloadUID": "uid",
+        "release": "A"
+      },
+      "identity": {
+        "available": true,
+        "workloadUID": "uid",
+        "release": "A",
+        "timestamp": 1800000600000,
+        "releaseStartedAt": 1800000000000
+      },
+      "inventory": {
+        "available": true,
+        "timestamp": 1800000600000,
+        "eligible": 1,
+        "observed": 1,
+        "excluded": 0
       },
       "cpu": {
-        "aggregatedUsage": { "available": true, "value": 40 },
-        "currentRequest": { "available": true, "value": 250 },
-        "currentLimit": { "available": true, "value": 1000 }
+        "series": [
+          {
+            "id": "pod-1",
+            "podUID": "pod-1",
+            "workloadUID": "uid",
+            "release": "A",
+            "kind": "gauge",
+            "samples": [
+              {
+                "timestamp": 1800000000000,
+                "value": 0
+              },
+              {
+                "timestamp": 1800000060000,
+                "value": 10
+              },
+              {
+                "timestamp": 1800000120000,
+                "value": 20
+              },
+              {
+                "timestamp": 1800000180000,
+                "value": 30
+              },
+              {
+                "timestamp": 1800000240000,
+                "value": 40
+              },
+              {
+                "timestamp": 1800000300000,
+                "value": 50
+              },
+              {
+                "timestamp": 1800000360000,
+                "value": 60
+              },
+              {
+                "timestamp": 1800000420000,
+                "value": 70
+              },
+              {
+                "timestamp": 1800000480000,
+                "value": 80
+              },
+              {
+                "timestamp": 1800000540000,
+                "value": 90
+              },
+              {
+                "timestamp": 1800000600000,
+                "value": 100
+              }
+            ]
+          }
+        ],
+        "currentRequest": {
+          "available": true,
+          "timestamp": 1800000600000,
+          "value": 1000
+        },
+        "currentLimit": {
+          "available": true,
+          "timestamp": 1800000600000,
+          "value": 4000
+        }
       },
       "memory": {
-        "aggregatedUsage": { "available": true, "value": 26214400 },
-        "currentRequest": { "available": true, "value": 67108864 },
-        "currentLimit": { "available": true, "value": 134217728 }
+        "series": [
+          {
+            "id": "pod-1",
+            "podUID": "pod-1",
+            "workloadUID": "uid",
+            "release": "A",
+            "kind": "gauge",
+            "samples": [
+              {
+                "timestamp": 1800000000000,
+                "value": 20971520
+              },
+              {
+                "timestamp": 1800000060000,
+                "value": 20971520
+              },
+              {
+                "timestamp": 1800000120000,
+                "value": 20971520
+              },
+              {
+                "timestamp": 1800000180000,
+                "value": 20971520
+              },
+              {
+                "timestamp": 1800000240000,
+                "value": 20971520
+              },
+              {
+                "timestamp": 1800000300000,
+                "value": 20971520
+              },
+              {
+                "timestamp": 1800000360000,
+                "value": 20971520
+              },
+              {
+                "timestamp": 1800000420000,
+                "value": 20971520
+              },
+              {
+                "timestamp": 1800000480000,
+                "value": 20971520
+              },
+              {
+                "timestamp": 1800000540000,
+                "value": 20971520
+              },
+              {
+                "timestamp": 1800000600000,
+                "value": 20971520
+              },
+              {
+                "timestamp": 1800000233127,
+                "value": 104857600
+              }
+            ]
+          }
+        ],
+        "currentRequest": {
+          "available": true,
+          "timestamp": 1800000600000,
+          "value": 268435456
+        },
+        "currentLimit": {
+          "available": true,
+          "timestamp": 1800000600000,
+          "value": 536870912
+        }
       }
     }
   ]

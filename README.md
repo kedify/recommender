@@ -14,15 +14,60 @@ import "github.com/kedify/recommender/analysis"
 output, err := analysis.Analyze(snapshot, policy)
 ```
 
-Callers are responsible for collecting and aggregating observations. In
-particular, CPU `max` or `percentile` selection happens in the caller's metrics
-query or snapshot adapter; the normalized `aggregatedUsage` value must match the
-supplied policy.
+Callers fetch raw range vectors and map them into `analysis.Input`; calculations
+and CPU counter normalization happen in this package. Schema v2 rejects v1 input.
+All timestamps are original Unix milliseconds, including current settings and
+identity. Do not stamp carried-forward values with query evaluation times. CPU
+gauges use millicores, memory uses bytes, and `cpu-counter-seconds` uses cumulative
+CPU seconds. Adjacent counter observations become millicores using delta / elapsed
+seconds × 1000; resets use the post-reset counter value. Intervals longer than the
+maximum gap are omitted rather than averaged into deceptively small rates.
 
-Input/output schema versions describe the data shape. The detector and effective
-policy versions preserve recommendation identity across callers. Consumers should
-pin a released module version and reject unsupported schemas instead of converting
-legacy input.
+Group observations by namespace, workload kind/name and container. The target and
+current identity select one workload UID and release. Keep other releases in raw
+series so the engine can detect visible rollback boundaries. Each replica/counter
+lifetime has a distinct series ID; preserve pod UID when available. Never sum
+replica usage into a per-container setting. The engine computes nearest-rank CPU
+percentiles per series, then takes the maximum across replicas; memory uses the
+maximum of every selected raw observation. Repeated source timestamps count once;
+conflicting values at the same timestamp are rejected.
+
+Current identity and settings must be fresh and unambiguous. Supply
+`ReleaseStartedAt` from an activation event when available, or leave it zero.
+The engine then starts at the first matching observation after the latest observed
+other release for that UID. This excludes visible A→B→A history. Output explicitly
+marks `releaseStartInferred`: an unobserved intermediate release cannot be detected
+from metrics alone. An authoritative activation boundary is needed to resolve that
+source limitation. Deleted/recreated workload UIDs are never pooled.
+
+Each resource independently reports observed start/end, distinct sample count,
+series count, inferred median cadence, gap count, maximum gap and coverage. Coverage
+is the union of observed timestamps for the current release across pod lifetimes,
+with intervals capped at the median source cadence and one cadence of edge
+tolerance. Healthy scale-out or pod replacement retains established release history.
+Sample count reports all distinct per-series samples; confidence uses unique release
+timestamps, measured release history and coverage and is capped at 95. Internal
+series gaps remain visible; only fresh observed pods count against current inventory. Long gaps,
+stale samples and insufficient history block sizing. The default minimum history
+is seven days; shortening a query does not shorten that safety guard. A caller can
+explicitly choose another minimum through the effective policy; automatic seasonal
+detection is outside this package.
+
+Inventory counts must describe the selected UID/release/container: eligible,
+observed eligible, and excluded containers. Mark inventory unavailable when the
+source cannot supply that denominator. Unknown, stale, incomplete or excluded
+inventory blocks downsizing, including introducing a limit where zero means no
+limit. Well-covered usage can still justify growth with partial quality. Inconsistent
+current settings across replicas must be marked unavailable by the adapter.
+
+Effective policy contains CPU percentile/max, headroom, request/limit ratios,
+request-only behavior, resource bounds, material-change thresholds and evidence
+guards. Defaults use CPU bounds 20–64,000 millicores and memory bounds 10 MiB–1 TiB;
+material change requires both 10% and 50 millicores / 8 MiB. Limits cannot fall below
+the retained request. Every resource returns measured evidence and explicit quality
+reasons; an empty recommendation list always includes a no-action reason. Detector
+and normalized-policy identities are independent from schema versions. Consumers
+should pin a released module version and invalidate/recompute old findings.
 
 ## Consumers
 
