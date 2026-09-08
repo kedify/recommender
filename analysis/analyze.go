@@ -328,6 +328,7 @@ func normalizeUsage(in Input, c ContainerObservation, obs ResourceObservation, r
 	pods := map[string]bool{}
 	selected := 0
 	aggregate := 0.0
+	aggregateConfidence := 0.0
 	releaseTimes := []int64{}
 	cadences := []float64{}
 	start := in.WindowStart
@@ -448,7 +449,26 @@ func normalizeUsage(in Input, c ContainerObservation, obs ResourceObservation, r
 			}
 			value = values[rank]
 		}
-		aggregate = math.Max(aggregate, value)
+		// The release may have enough history while a new replica alone supplies
+		// its sizing value. Keep eligibility release-wide but do not borrow
+		// confidence from another replica with a lower aggregate.
+		seriesCovered := math.Min(cadence, float64(p.Evidence.MaximumGapSeconds))
+		for _, gap := range gaps {
+			seriesCovered += math.Min(gap, cadence)
+		}
+		seriesSpan := float64(last-first)/1000 + math.Min(cadence, float64(p.Evidence.MaximumGapSeconds))
+		seriesCoverage := 0.0
+		if seriesSpan > 0 {
+			seriesCoverage = math.Min(1, seriesCovered/seriesSpan)
+		}
+		seriesConfidence := 95 * math.Min(1, seriesSpan/float64(p.Evidence.MinimumHistorySeconds)) * seriesCoverage * math.Min(1, float64(n)/float64(p.Evidence.MinimumSamples))
+		if value > aggregate || selected == 1 {
+			aggregate = value
+			aggregateConfidence = seriesConfidence
+		} else if value == aggregate {
+			// Equal sizing values can use the strongest independently supporting series.
+			aggregateConfidence = math.Max(aggregateConfidence, seriesConfidence)
+		}
 	}
 	q.SeriesCount = selected
 	if selected == 0 {
@@ -475,7 +495,9 @@ func normalizeUsage(in Input, c ContainerObservation, obs ResourceObservation, r
 		covered += math.Min(gap, cadence)
 		releaseMaxGap = math.Max(releaseMaxGap, gap)
 	}
-	q.Coverage = math.Min(1, covered/(float64(in.EvaluationTime-in.WindowStart)/1000))
+	if in.EvaluationTime > start {
+		q.Coverage = math.Min(1, covered/(float64(in.EvaluationTime-start)/1000))
+	}
 	q.ObservedIntervalHours = float64(q.ObservedEnd-q.ObservedStart) / 3600000
 	minSpan := float64(q.ObservedEnd-q.ObservedStart)/1000 + math.Min(cadence, float64(p.Evidence.MaximumGapSeconds))
 	minCount := len(unique)
@@ -498,6 +520,7 @@ func normalizeUsage(in Input, c ContainerObservation, obs ResourceObservation, r
 		addReason(q, ReasonInterruptedHistory)
 	}
 	confidence := int(math.Floor(95 * math.Min(1, minSpan/float64(p.Evidence.MinimumHistorySeconds)) * q.Coverage * math.Min(1, float64(minCount)/float64(p.Evidence.MinimumSamples))))
+	confidence = min(confidence, int(math.Floor(aggregateConfidence)))
 	return Signal{Available: true, Value: aggregate, Timestamp: q.ObservedEnd}, confidence, len(pods), nil
 }
 

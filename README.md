@@ -43,10 +43,14 @@ source limitation. Deleted/recreated workload UIDs are never pooled.
 Each resource independently reports observed start/end, distinct sample count,
 series count, inferred median cadence, gap count, maximum gap and coverage. Coverage
 is the union of observed timestamps for the current release across pod lifetimes,
+divided by the selected release segment duration rather than pre-release lookback,
 with intervals capped at the median source cadence and one cadence of edge
 tolerance. Healthy scale-out or pod replacement retains established release history.
 Sample count reports all distinct per-series samples; confidence uses unique release
-timestamps, measured release history and coverage and is capped at 95. Internal
+timestamps, measured release history and coverage and is capped at 95. It is also
+capped by the history, sample count and coverage of the series supplying the sizing
+value; a newly busy replica can justify growth without borrowing another replica's
+confidence. Equal sizing values use the strongest independently supporting series. Internal
 series gaps remain visible; only fresh observed pods count against current inventory. Long gaps,
 stale samples and insufficient history block sizing. The default minimum history
 is seven days; shortening a query does not shorten that safety guard. A caller can

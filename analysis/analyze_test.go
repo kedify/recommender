@@ -402,7 +402,11 @@ func TestStableReleaseSurvivesReplicaChurn(t *testing.T) {
 			}
 			out := run(t, in, Policy{})
 			for _, r := range out.Results {
-				if len(r.Recommendations) == 0 || r.Recommendations[0].Confidence != 95 || r.DataQuality.Coverage != 1 {
+				expectedConfidence := 95
+				if replacement {
+					expectedConfidence = 94
+				} // The supporting old pod ran 30 minutes short of a full week.
+				if len(r.Recommendations) == 0 || r.Recommendations[0].Confidence != expectedConfidence || r.DataQuality.Coverage != 1 {
 					t.Fatalf("healthy churn erased release history: %+v", r)
 				}
 			}
@@ -411,9 +415,49 @@ func TestStableReleaseSurvivesReplicaChurn(t *testing.T) {
 			}
 			c.Inventory.Available = false
 			r := run(t, in, Policy{}).Results[1]
-			if len(r.Recommendations) == 0 || r.Recommendations[0].SuggestedValue != 3000 {
+			if len(r.Recommendations) == 0 || r.Recommendations[0].SuggestedValue != 3000 || r.Recommendations[0].Confidence >= 95 {
 				t.Fatalf("new replica peak cannot grow stable release %+v", r)
 			}
 		})
+	}
+}
+
+func TestReleaseCoverageIndependentOfOlderLookback(t *testing.T) {
+	for _, inferred := range []bool{false, true} {
+		t.Run(map[bool]string{false: "activation boundary", true: "observed boundary"}[inferred], func(t *testing.T) {
+			in := fixture(7*86400, 60)
+			if inferred {
+				in.Containers[0].Identity.ReleaseStartedAt = 0
+			}
+			weekly := run(t, in, Policy{})
+			in.WindowStart -= 23 * 86400 * 1000
+			longer := run(t, in, Policy{})
+			if !reflect.DeepEqual(weekly, longer) {
+				t.Fatalf("older lookback changed identical current-release evidence: weekly=%+v longer=%+v", weekly.Results, longer.Results)
+			}
+			for _, r := range longer.Results {
+				if r.DataQuality.Coverage != 1 || len(r.Recommendations) == 0 {
+					t.Fatalf("dense week diluted by pre-release time: %+v", r)
+				}
+			}
+		})
+	}
+}
+
+func TestSinglePointInferredReleaseHasFiniteCoverage(t *testing.T) {
+	in := fixture(600, 60)
+	c := &in.Containers[0]
+	c.Identity.ReleaseStartedAt = 0
+	for _, obs := range []*ResourceObservation{&c.CPU, &c.Memory} {
+		obs.Series[0].Samples = obs.Series[0].Samples[len(obs.Series[0].Samples)-1:]
+	}
+	out := run(t, in, Policy{})
+	if _, err := json.Marshal(out); err != nil {
+		t.Fatalf("zero-length release segment cannot be serialized: %v", err)
+	}
+	for _, r := range out.Results {
+		if r.DataQuality.Coverage != 0 || len(r.Recommendations) != 0 {
+			t.Fatalf("single-point release authorized sizing: %+v", r)
+		}
 	}
 }
