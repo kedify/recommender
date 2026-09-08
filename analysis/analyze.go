@@ -237,13 +237,24 @@ func analyzeResource(in Input, c ContainerObservation, r Resource, p Policy) (Re
 		result.NoActionReason = q.Reasons[0]
 		return result, nil
 	}
-	suggestedRequest := math.Max(bounds.Minimum, math.Min(bounds.Maximum, usage.Value*headroom))
-	suggestedLimit := math.Max(suggestedRequest, math.Min(bounds.Maximum, suggestedRequest*ratio))
-	if !finite(usage.Value*headroom) || !finite(suggestedRequest*ratio) {
+	rawSuggestedRequest := usage.Value * headroom
+	if !finite(rawSuggestedRequest) {
 		return ResourceAnalysis{}, fmt.Errorf("suggested value overflow")
 	}
-	if suggestedRequest != usage.Value*headroom || suggestedLimit != suggestedRequest*ratio {
+	suggestedRequest := math.Max(bounds.Minimum, math.Min(bounds.Maximum, rawSuggestedRequest))
+	if suggestedRequest != rawSuggestedRequest {
 		addReason(q, ReasonBounds)
+	}
+	var suggestedLimit float64
+	if !requestsOnly {
+		rawSuggestedLimit := suggestedRequest * ratio
+		if !finite(rawSuggestedLimit) {
+			return ResourceAnalysis{}, fmt.Errorf("suggested value overflow")
+		}
+		suggestedLimit = math.Max(suggestedRequest, math.Min(bounds.Maximum, rawSuggestedLimit))
+		if suggestedLimit != rawSuggestedLimit {
+			addReason(q, ReasonBounds)
+		}
 	}
 	inventorySuppressedDownsize := false
 	for _, s := range []struct {

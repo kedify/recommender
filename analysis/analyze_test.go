@@ -349,6 +349,42 @@ func TestInventoryReasonOnlyForMaterialSuppressedDownsize(t *testing.T) {
 		}
 	}
 }
+func TestRequestsOnlyIgnoresLimitSizing(t *testing.T) {
+	t.Run("unused limit overflow", func(t *testing.T) {
+		in := fixture(600, 60)
+		p := shortPolicy()
+		p.CPU.RequestsOnly = true
+		p.CPU.LimitsToRequestsRatio = math.MaxFloat64
+
+		out, err := Analyze(in, p)
+		if err != nil {
+			t.Fatalf("request-only analysis failed on unused limit sizing: %v", err)
+		}
+		r := out.Results[1]
+		if len(r.Recommendations) != 1 || r.Recommendations[0].Setting != SettingRequests {
+			t.Fatalf("request recommendation missing: %+v", r)
+		}
+		if has(r.DataQuality, ReasonBounds) {
+			t.Fatalf("unused limit clamp degraded request-only quality: %+v", r.DataQuality)
+		}
+	})
+
+	t.Run("request bound remains reported", func(t *testing.T) {
+		in := fixture(600, 60)
+		p := shortPolicy()
+		p.CPU.RequestsOnly = true
+		p.CPU.LimitsToRequestsRatio = math.MaxFloat64
+		p.CPU.Bounds.Minimum = 50
+
+		r := run(t, in, p).Results[1]
+		if len(r.Recommendations) != 1 || r.Recommendations[0].Setting != SettingRequests || r.Recommendations[0].SuggestedValue != 50 {
+			t.Fatalf("bounded request recommendation missing: %+v", r)
+		}
+		if !has(r.DataQuality, ReasonBounds) {
+			t.Fatalf("request bound was not reported: %+v", r.DataQuality)
+		}
+	})
+}
 func TestStaleGapsDuplicatesAndFreshSignals(t *testing.T) {
 	for _, mode := range []string{"stale", "gap", "duplicates", "request", "limit"} {
 		t.Run(mode, func(t *testing.T) {
