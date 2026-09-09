@@ -279,6 +279,27 @@ func TestCounterGapSurvivesDiscardedRate(t *testing.T) {
 	}
 }
 
+func TestReleaseGapAcrossPodLifetimesIsReported(t *testing.T) {
+	in := fixture(660, 60)
+	c := &in.Containers[0]
+	first := c.CPU.Series[0]
+	first.ID, first.PodUID = "old-pod", "old-pod"
+	first.Samples = []Sample{{Timestamp: epoch, Value: 10}, {Timestamp: epoch + 60_000, Value: 10}}
+	second := first
+	second.ID, second.PodUID = "new-pod", "new-pod"
+	second.Samples = []Sample{{Timestamp: epoch + 600_000, Value: 10}, {Timestamp: epoch + 660_000, Value: 10}}
+	c.CPU.Series = []Series{first, second}
+	c.Inventory.Eligible, c.Inventory.Observed = 2, 2
+
+	p := shortPolicy()
+	p.Evidence.MaximumGapSeconds = 300
+	p.Evidence.FreshnessSeconds = 300
+	r := run(t, in, p).Results[1]
+	if r.DataQuality.MaximumGapSeconds != 540 || !has(r.DataQuality, ReasonInterruptedHistory) {
+		t.Fatalf("gap between pod lifetimes was not reported: %+v", r.DataQuality)
+	}
+}
+
 func TestAggregateTimestampTracksSelectedObservation(t *testing.T) {
 	for _, kind := range []SampleKind{SampleGauge, SampleCPUCounterSeconds} {
 		t.Run(string(kind), func(t *testing.T) {
@@ -397,6 +418,54 @@ func TestRequestsOnlyIgnoresLimitSizing(t *testing.T) {
 			t.Fatalf("request bound was not reported: %+v", r.DataQuality)
 		}
 	})
+}
+
+func TestBoundBecomesNoActionReasonOnlyForMaterialSuppression(t *testing.T) {
+	for _, test := range []struct {
+		name           string
+		currentRequest float64
+		wantNoAction   Reason
+	}{
+		{"non-material candidate", 20, ReasonNoMaterialChange},
+		{"material candidate", 69, ReasonBounds},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			in := fixture(600, 60)
+			cpu := &in.Containers[0].CPU
+			for i := range cpu.Series[0].Samples {
+				cpu.Series[0].Samples[i].Value = 1
+			}
+			cpu.CurrentRequest.Value = test.currentRequest
+			p := shortPolicy()
+			p.CPU.RequestsOnly = true
+
+			r := run(t, in, p).Results[1]
+			if len(r.Recommendations) != 0 || r.NoActionReason != test.wantNoAction {
+				t.Fatalf("wrong binding reason for current request %v: %+v", test.currentRequest, r)
+			}
+			if !has(r.DataQuality, ReasonBounds) {
+				t.Fatalf("applied request bound was omitted from quality evidence: %+v", r.DataQuality)
+			}
+		})
+	}
+}
+
+func TestStaleLimitClampCannotBecomeNoActionReason(t *testing.T) {
+	in := fixture(600, 60)
+	cpu := &in.Containers[0].CPU
+	cpu.CurrentRequest.Value = 30
+	cpu.CurrentLimit.Value = 64000
+	cpu.CurrentLimit.Timestamp = epoch
+	p := shortPolicy()
+	p.CPU.LimitsToRequestsRatio = 3000
+
+	r := run(t, in, p).Results[1]
+	if len(r.Recommendations) != 0 || r.NoActionReason != ReasonNoMaterialChange {
+		t.Fatalf("unusable limit clamp reported a binding bound: %+v", r)
+	}
+	if !has(r.DataQuality, ReasonStaleLimit) || !has(r.DataQuality, ReasonBounds) {
+		t.Fatalf("stale bounded limit was omitted from quality evidence: %+v", r.DataQuality)
+	}
 }
 func TestStaleGapsDuplicatesAndFreshSignals(t *testing.T) {
 	for _, mode := range []string{"stale", "gap", "duplicates", "request", "limit"} {

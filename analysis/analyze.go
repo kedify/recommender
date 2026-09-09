@@ -242,7 +242,9 @@ func analyzeResource(in Input, c ContainerObservation, r Resource, p Policy) (Re
 		return ResourceAnalysis{}, fmt.Errorf("suggested value overflow")
 	}
 	suggestedRequest := math.Max(bounds.Minimum, math.Min(bounds.Maximum, rawSuggestedRequest))
-	if suggestedRequest != rawSuggestedRequest {
+	requestBounded := suggestedRequest != rawSuggestedRequest
+	boundsSuppressedAction := requestBounded && isMaterial(obs.CurrentRequest.Value, rawSuggestedRequest, bounds) && !isMaterial(obs.CurrentRequest.Value, suggestedRequest, bounds)
+	if requestBounded {
 		addReason(q, ReasonBounds)
 	}
 	var suggestedLimit float64
@@ -252,7 +254,9 @@ func analyzeResource(in Input, c ContainerObservation, r Resource, p Policy) (Re
 			return ResourceAnalysis{}, fmt.Errorf("suggested value overflow")
 		}
 		suggestedLimit = math.Max(suggestedRequest, math.Min(bounds.Maximum, rawSuggestedLimit))
-		if suggestedLimit != rawSuggestedLimit {
+		limitBounded := suggestedLimit != rawSuggestedLimit
+		boundsSuppressedAction = boundsSuppressedAction || limitOK && limitBounded && isMaterial(obs.CurrentLimit.Value, rawSuggestedLimit, bounds) && !isMaterial(obs.CurrentLimit.Value, suggestedLimit, bounds)
+		if limitBounded {
 			addReason(q, ReasonBounds)
 		}
 	}
@@ -275,6 +279,7 @@ func analyzeResource(in Input, c ContainerObservation, r Resource, p Policy) (Re
 			}
 			if s.suggested < retainedRequest {
 				addReason(q, ReasonBounds)
+				boundsSuppressedAction = boundsSuppressedAction || isMaterial(s.current.Value, s.suggested, bounds)
 				continue
 			}
 		}
@@ -285,6 +290,7 @@ func analyzeResource(in Input, c ContainerObservation, r Resource, p Policy) (Re
 		// Do not propose a request above a known retained limit.
 		if s.setting == SettingRequests && limitOK && obs.CurrentLimit.Value > 0 && s.suggested > obs.CurrentLimit.Value && (requestsOnly || !isMaterial(obs.CurrentLimit.Value, suggestedLimit, bounds)) {
 			addReason(q, ReasonBounds)
+			boundsSuppressedAction = boundsSuppressedAction || isMaterial(s.current.Value, s.suggested, bounds)
 			continue
 		}
 		if isMaterial(s.current.Value, s.suggested, bounds) {
@@ -306,13 +312,8 @@ func analyzeResource(in Input, c ContainerObservation, r Resource, p Policy) (Re
 				}
 			}
 		}
-		if result.NoActionReason == "" {
-			for _, reason := range q.Reasons {
-				if reason == ReasonBounds {
-					result.NoActionReason = reason
-					break
-				}
-			}
+		if result.NoActionReason == "" && boundsSuppressedAction {
+			result.NoActionReason = ReasonBounds
 		}
 		if result.NoActionReason == "" {
 			result.NoActionReason = ReasonNoMaterialChange
@@ -345,6 +346,7 @@ func normalizeUsage(in Input, c ContainerObservation, obs ResourceObservation, r
 	aggregateTimestamp := int64(0)
 	aggregateConfidence := 0.0
 	releaseTimes := []int64{}
+	releaseSpans := [][2]int64{}
 	cadences := []float64{}
 	start := in.WindowStart
 	if c.Identity.ReleaseStartedAt > start {
@@ -438,6 +440,7 @@ func normalizeUsage(in Input, c ContainerObservation, obs ResourceObservation, r
 		if len(values) == 0 {
 			continue
 		}
+		releaseSpans = append(releaseSpans, [2]int64{clean[0].Timestamp, clean[len(clean)-1].Timestamp})
 		selected++
 		pod := s.PodUID
 		if pod == "" {
@@ -531,6 +534,18 @@ func normalizeUsage(in Input, c ContainerObservation, obs ResourceObservation, r
 		gap := float64(unique[i]-unique[i-1]) / 1000
 		covered += math.Min(gap, cadence)
 		releaseMaxGap = math.Max(releaseMaxGap, gap)
+	}
+	// Derived CPU rate endpoints can exaggerate a gap after an interval is
+	// discarded. Use raw source spans to report gaps between pod lifetimes.
+	sort.Slice(releaseSpans, func(i, j int) bool { return releaseSpans[i][0] < releaseSpans[j][0] })
+	if len(releaseSpans) > 0 {
+		last := releaseSpans[0][1]
+		for _, span := range releaseSpans[1:] {
+			if span[0] > last {
+				q.MaximumGapSeconds = math.Max(q.MaximumGapSeconds, float64(span[0]-last)/1000)
+			}
+			last = max(last, span[1])
+		}
 	}
 	if in.EvaluationTime > start {
 		q.Coverage = math.Min(1, covered/(float64(in.EvaluationTime-start)/1000))
