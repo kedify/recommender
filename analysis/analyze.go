@@ -403,11 +403,11 @@ func normalizeUsage(in Input, c ContainerObservation, obs ResourceObservation, r
 			sourceCadence := sourceGaps[(len(sourceGaps)-1)/2]
 			for _, gap := range sourceGaps {
 				q.MaximumGapSeconds = math.Max(q.MaximumGapSeconds, gap)
-				oversizedCounterGap := s.Kind == SampleCPUCounterSeconds && gap > float64(p.Evidence.MaximumGapSeconds)
-				if gap > 1.5*sourceCadence || oversizedCounterGap {
+				oversizedGap := gap > float64(p.Evidence.MaximumGapSeconds)
+				if gap > 1.5*sourceCadence || oversizedGap {
 					q.GapCount++
 				}
-				if oversizedCounterGap {
+				if s.Kind == SampleCPUCounterSeconds && oversizedGap {
 					addReason(q, ReasonInterruptedHistory)
 				}
 			}
@@ -542,7 +542,11 @@ func normalizeUsage(in Input, c ContainerObservation, obs ResourceObservation, r
 		last := releaseSpans[0][1]
 		for _, span := range releaseSpans[1:] {
 			if span[0] > last {
-				q.MaximumGapSeconds = math.Max(q.MaximumGapSeconds, float64(span[0]-last)/1000)
+				gap := float64(span[0]-last) / 1000
+				q.MaximumGapSeconds = math.Max(q.MaximumGapSeconds, gap)
+				if cadence > 0 && gap > 1.5*cadence || gap > float64(p.Evidence.MaximumGapSeconds) {
+					q.GapCount++
+				}
 			}
 			last = max(last, span[1])
 		}

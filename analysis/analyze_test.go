@@ -5,6 +5,7 @@ package analysis
 
 import (
 	"encoding/json"
+	"fmt"
 	"math"
 	"os"
 	"reflect"
@@ -295,8 +296,39 @@ func TestReleaseGapAcrossPodLifetimesIsReported(t *testing.T) {
 	p.Evidence.MaximumGapSeconds = 300
 	p.Evidence.FreshnessSeconds = 300
 	r := run(t, in, p).Results[1]
-	if r.DataQuality.MaximumGapSeconds != 540 || !has(r.DataQuality, ReasonInterruptedHistory) {
+	if r.DataQuality.MaximumGapSeconds != 540 || r.DataQuality.GapCount != 1 || !has(r.DataQuality, ReasonInterruptedHistory) {
 		t.Fatalf("gap between pod lifetimes was not reported: %+v", r.DataQuality)
+	}
+}
+
+func TestGaugeGapBeyondPolicyIsCountedAtRegularCadence(t *testing.T) {
+	in := fixture(1200, 600)
+	p := shortPolicy()
+	p.Evidence.MaximumGapSeconds = 300
+	r := run(t, in, p).Results[1]
+	if r.DataQuality.MaximumGapSeconds != 600 || r.DataQuality.GapCount != 2 || !has(r.DataQuality, ReasonInterruptedHistory) {
+		t.Fatalf("regular gauge gaps beyond policy were not counted: %+v", r.DataQuality)
+	}
+}
+
+func TestSingleSamplePodChurnBelowGapPolicyIsNotCounted(t *testing.T) {
+	in := fixture(120, 60)
+	c := &in.Containers[0]
+	base := c.CPU.Series[0]
+	c.CPU.Series = nil
+	for i, timestamp := range []int64{epoch, epoch + 60_000, epoch + 120_000} {
+		series := base
+		series.ID = fmt.Sprintf("pod-%d", i)
+		series.PodUID = series.ID
+		series.Samples = []Sample{{Timestamp: timestamp, Value: 10}}
+		c.CPU.Series = append(c.CPU.Series, series)
+	}
+	c.Inventory.Eligible, c.Inventory.Observed = 3, 3
+	p := shortPolicy()
+	p.Evidence.MaximumGapSeconds = 300
+	r := run(t, in, p).Results[1]
+	if r.DataQuality.MaximumGapSeconds != 60 || r.DataQuality.GapCount != 0 || has(r.DataQuality, ReasonInterruptedHistory) {
+		t.Fatalf("sub-policy churn gaps were counted without a known cadence: %+v", r.DataQuality)
 	}
 }
 
