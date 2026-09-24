@@ -101,6 +101,13 @@ func NormalizePolicy(p Policy) (Policy, error) {
 	if e.MinimumHistorySeconds < 1 || e.MinimumSamples < 2 || !positive(e.MinimumCoverage) || e.MinimumCoverage > 1 || e.FreshnessSeconds < 1 {
 		return Policy{}, fmt.Errorf("invalid evidence policy")
 	}
+	if p.Memory.LeakDetection != nil {
+		leak, err := normalizeMemoryLeakPolicy(*p.Memory.LeakDetection)
+		if err != nil {
+			return Policy{}, err
+		}
+		p.Memory.LeakDetection = &leak
+	}
 	return p, nil
 }
 func PolicyVersion(p Policy) (string, error) {
@@ -149,6 +156,12 @@ func Analyze(in Input, p Policy) (Output, error) {
 			result, err := analyzeResource(in, c, r, p)
 			if err != nil {
 				return Output{}, fmt.Errorf("%s %s: %w", c.Target.Name, r, err)
+			}
+			if r == ResourceMemory && p.Memory.LeakDetection != nil {
+				result.MemoryLeak = analyzeMemoryLeak(in, c, p, result)
+				if result.MemoryLeak.Status == MemoryLeakPotential {
+					result.Notices = append(result.Notices, ReasonPotentialMemoryLeak)
+				}
 			}
 			out.Results = append(out.Results, result)
 		}

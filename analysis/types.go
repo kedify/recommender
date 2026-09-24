@@ -42,7 +42,7 @@ type ContainerObservation struct {
 // PreviousRelease supplies raw usage from an earlier rollout of this workload.
 // EvaluationTime is the last historical observation, not today's timestamp.
 // ReleaseStartedAt may be zero to infer the observed segment. Current settings,
-// inventory and OOM events always refer to the current rollout.
+// inventory, OOM events and leak findings always refer to the current rollout.
 type PreviousRelease struct {
 	Release          string   `json:"release"`
 	ReleaseStartedAt int64    `json:"releaseStartedAt,omitempty"`
@@ -102,7 +102,7 @@ const (
 	SampleCPUCounterSeconds SampleKind = "cpu-counter-seconds"
 )
 
-// ID uniquely identifies an uninterrupted time series. PodUID is preferred when
+// ID uniquely identifies a container lifetime's time series. PodUID is preferred when
 // available; ID is the fallback. Never merge replicas or counter lifetimes.
 type Series struct {
 	ID          string     `json:"id"`
@@ -174,6 +174,8 @@ type MemoryPolicy struct {
 	LimitsToRequestsRatio float64        `json:"limitsToRequestsRatio"`
 	Bounds                Bounds         `json:"bounds"`
 	RequestsOnly          bool           `json:"requestsOnly"`
+	// Nil disables leak detection; an empty policy enables its defaults.
+	LeakDetection *MemoryLeakPolicy `json:"leakDetection,omitempty"`
 }
 type Output struct {
 	SchemaVersion   string             `json:"schemaVersion"`
@@ -190,16 +192,17 @@ const (
 )
 
 type ResourceAnalysis struct {
-	DecisionTrace   *DecisionTrace   `json:"decisionTrace,omitempty"`
-	Target          Target           `json:"target"`
-	Resource        Resource         `json:"resource"`
-	Recommendations []Recommendation `json:"recommendations,omitempty"`
-	Evidence        ResourceEvidence `json:"evidence"`
-	DataQuality     DataQuality      `json:"dataQuality"`
-	NoActionReason  Reason           `json:"noActionReason,omitempty"`
-	Notices         []Reason         `json:"notices,omitempty"`
-	OOMAdjustment   *OOMAdjustment   `json:"oomAdjustment,omitempty"`
-	RolloutFallback *RolloutFallback `json:"rolloutFallback,omitempty"`
+	DecisionTrace   *DecisionTrace      `json:"decisionTrace,omitempty"`
+	Target          Target              `json:"target"`
+	Resource        Resource            `json:"resource"`
+	Recommendations []Recommendation    `json:"recommendations,omitempty"`
+	Evidence        ResourceEvidence    `json:"evidence"`
+	DataQuality     DataQuality         `json:"dataQuality"`
+	NoActionReason  Reason              `json:"noActionReason,omitempty"`
+	Notices         []Reason            `json:"notices,omitempty"`
+	OOMAdjustment   *OOMAdjustment      `json:"oomAdjustment,omitempty"`
+	MemoryLeak      *MemoryLeakAnalysis `json:"memoryLeak,omitempty"`
+	RolloutFallback *RolloutFallback    `json:"rolloutFallback,omitempty"`
 }
 
 // RolloutFallback identifies historical usage used to size the current target.

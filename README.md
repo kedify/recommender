@@ -79,7 +79,7 @@ Historical evidence is evaluated at that time, capped at the current rollout's
 start, and retains its original timestamps. `rolloutFallback` in each resource
 result identifies the historical source and preserves the current rollout's
 failed data-quality checks. The result target, identity, allocation signals,
-inventory checks and OOM events remain current. Historical pod
+inventory checks, OOM events, and leak detection remain current. Historical pod
 counts cannot authorize downsizing currently unobserved pods. Existing callers
 that omit `previousReleases` keep current-rollout-only behavior.
 
@@ -211,6 +211,100 @@ findings from older detectors/policies.
 - **Other sources:** Kubernetes termination status, event stores, or offline JSON
   may populate the same structure directly. Do not infer an OOM solely from a
   restart count or exit code. Source collection and conversion belong to callers.
+
+## Optional potential memory-leak detection
+
+Enable the advisory detector when calling the same `Analyze` entry point:
+
+```go
+policy := analysis.DefaultPolicy()
+policy.Memory.LeakDetection = &analysis.MemoryLeakPolicy{} // Enable defaults.
+output, err := analysis.Analyze(snapshot, policy)
+```
+
+`nil` (the default) disables detection and omits its policy/output fields. In JSON,
+use `"memory": {"leakDetection": {}}` within the policy to enable defaults; omit
+`leakDetection` or use `null` to disable it. Nonzero policy fields override defaults.
+The detector consumes the existing byte-valued memory gauges and normalized OOM
+events; it has no metric names, runtime dependencies, or source-specific adapters.
+Keep the memory measurement semantics consistent within a series.
+
+The algorithm looks for a persistently rising **lower baseline**, rather than
+ever-higher peaks that may be reclaimed by GC:
+
+1. Select the current workload UID/release segment and the latest 24 hours. Analyze
+   each replica/container lifetime separately; do not stitch releases or replicas
+   together. Skip the first 30 minutes of each observed lifetime as warmup. A known
+   OOM termination also splits an episode when the adapter has reused a series ID.
+   Adapters must still give all container lifetimes distinct IDs: non-OOM restarts
+   cannot reliably be inferred from a drop in memory usage.
+2. Divide each episode into complete 30-minute buckets. Sort the memory values in
+   each bucket and take P10: the value at the one-based rank `ceil(0.10 * count)`.
+   This estimates the lower baseline and reduces the effect of short-lived peaks;
+   it is not a measurement of live heap or a detected GC event.
+3. Require at least six hours after warmup and at least 12 usable complete buckets,
+   each with five distinct source samples. Skip empty or undersampled buckets;
+   they need not be adjacent and are never replaced with zero-valued baselines.
+   Apply `evidence.minimumCoverage` to the **whole episode** (default 90%),
+   including empty buckets in its denominator. The usable buckets must also
+   supply the configured minimum history. Apply `freshnessSeconds` (default five
+   minutes) to the episode's final sample. One replica cannot supply another's
+   missing coverage. A matching pod's OOM may explain why an episode ended before
+   evaluation time if its final sample was fresh at termination. An OOM with
+   unknown pod identity cannot establish that link.
+4. Fit a robust [Theil–Sen trend](https://docs.scipy.org/doc/scipy/reference/generated/scipy.stats.theilslopes.html):
+   the median slope between every pair of usable bucket baselines, using their
+   actual elapsed time so missing buckets do not compress time, implemented locally
+   without dependencies. Require a positive slope and at least 80% of earlier/later
+   bucket pairs to increase. The median baseline of the last quarter of buckets
+   must exceed that of the first quarter by both 64 MiB and 20%. When the starting
+   baseline is zero, only the absolute growth threshold applies.
+5. Require the trend to continue in the latest quarter (at least six buckets):
+   the same 80% consistency threshold and a slope at least 25% of the whole-episode
+   slope. This suppresses startup steps, caches that have plateaued, and sustained
+   recovery. Correlated OOMs support the finding but never establish a leak alone.
+
+Tune the exposed lookback, bucket duration, warmup, minimum history/samples,
+absolute/relative growth, and trend consistency through `MemoryLeakPolicy`.
+Durations use seconds; zero fields select defaults. Policies must retain at least
+12 buckets of minimum history and at most 256 buckets in the lookback, bounding the
+pairwise computation independently of the number of raw samples. P10 and the recent
+trend check are fixed parts of detector version `2`.
+
+Each memory result gains `memoryLeak`, including:
+
+- `status`: `potential-leak` if any episode passes the heuristic;
+  `no-leak-pattern` if all considered episodes were evaluable and none passes;
+  `insufficient-data` when none passes and evidence is incomplete or unavailable.
+- The detector version, selected window, evaluated/suspected/skipped episode counts,
+  and explicit reasons. A positive finding may coexist with skipped episodes.
+- Per-episode series/pod identity, observed interval, sample/bucket counts, coverage,
+  starting/ending baselines, growth in bytes and as a fraction, overall/recent slopes
+  in bytes/hour, and trend consistency. Consistency is a measured fraction of
+  increasing pairs, **not a probability of a leak**. `relativeGrowth` is omitted
+  when the starting baseline is zero.
+- `oomKillIDs` on corroborated episodes, referencing the existing `evidence.oomKills`.
+  A positive finding also adds `potential-memory-leak` to the resource's `notices`.
+
+This diagnostic does not modify request/limit recommendations, sizing confidence,
+or existing OOM adjustments. Its default six-hour history requirement is
+independent of the default one-hour sizing guard. A caller can configure a longer
+sizing minimum, allowing leak detection to report a pattern while sizing remains
+blocked. Missing resource settings or incomplete inventory do not prevent this
+diagnostic; ambiguous/stale workload identity and insufficient usage evidence do.
+The normalized policy hash includes enabled detector settings. Enabling the leak
+heuristic does not alter resource sizing; it has its own
+`memoryLeak.detectorVersion` for cache invalidation.
+
+Treat this as a **potential leak, not a diagnosis**. Growing useful allocations,
+unbounded caches, increasing traffic, and allocator retention can look identical
+in container memory metrics. Conversely, slow leaks, short OOM loops, long GC cycles,
+or growth that started only recently may not pass these conservative thresholds.
+No-pattern means no qualifying pattern in the supplied window, not proof of safety
+or complete replica/OOM collection. Confirmation needs application/load context and
+runtime diagnostics such as [heap profiles](https://go.dev/doc/diagnostics).
+Comparing leak incidence across historical releases is left to callers; one result
+only evaluates its selected release segment.
 
 ## Consumers
 
