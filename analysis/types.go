@@ -8,7 +8,7 @@ package analysis
 const (
 	InputSchemaVersion               = "resource-analysis-input/v2"
 	OutputSchemaVersion              = "resource-analysis-output/v3"
-	ResourceRightSizeDetectorVersion = "7"
+	ResourceRightSizeDetectorVersion = "8"
 	MaxPreviousReleases              = 3
 )
 
@@ -34,20 +34,38 @@ type ContainerObservation struct {
 	Inventory Inventory           `json:"inventory"`
 	CPU       ResourceObservation `json:"cpu"`
 	Memory    ResourceObservation `json:"memory"`
+	OOMKills  []OOMKill           `json:"oomKills,omitempty"`
 	// Newest first. Only the first three entries are eligible as fallback usage.
 	PreviousReleases []PreviousRelease `json:"previousReleases,omitempty"`
 }
 
 // PreviousRelease supplies raw usage from an earlier rollout of this workload.
 // EvaluationTime is the last historical observation, not today's timestamp.
-// ReleaseStartedAt may be zero to infer the observed segment. Current settings
-// and inventory always refer to the current rollout.
+// ReleaseStartedAt may be zero to infer the observed segment. Current settings,
+// inventory and OOM events always refer to the current rollout.
 type PreviousRelease struct {
 	Release          string   `json:"release"`
 	ReleaseStartedAt int64    `json:"releaseStartedAt,omitempty"`
 	EvaluationTime   int64    `json:"evaluationTime"`
 	CPU              []Series `json:"cpu"`
 	Memory           []Series `json:"memory"`
+}
+
+// OOMKill is a positive out-of-memory termination observation for this container.
+// ID identifies the event, independently of its source (for example, pod UID plus
+// termination time). Repeated observations of the same event must retain its ID
+// and original Unix-millisecond Timestamp, not a scrape or query evaluation time.
+// WorkloadUID and Release describe the container at termination. PodUID is optional.
+// MemoryLimitBytes is the positive memory limit in effect at termination, when
+// known; zero means no known finite limit. Do not substitute a later/current limit.
+// Omitted OOMKills means no supplied evidence, not proof that no OOMs occurred.
+type OOMKill struct {
+	ID               string  `json:"id"`
+	PodUID           string  `json:"podUID,omitempty"`
+	WorkloadUID      string  `json:"workloadUID"`
+	Release          string  `json:"release"`
+	Timestamp        int64   `json:"timestamp"`
+	MemoryLimitBytes float64 `json:"memoryLimitBytes,omitempty"`
 }
 
 // ReleaseStartedAt is an activation boundary or a conservative observed segment
@@ -152,6 +170,7 @@ type CPUPolicy struct {
 type MemoryPolicy struct {
 	Strategy              MemoryStrategy `json:"strategy"`
 	HeadroomCoefficient   float64        `json:"headroomCoefficient"`
+	OOMKilledCoefficient  float64        `json:"oomKilledCoefficient"`
 	LimitsToRequestsRatio float64        `json:"limitsToRequestsRatio"`
 	Bounds                Bounds         `json:"bounds"`
 	RequestsOnly          bool           `json:"requestsOnly"`
@@ -179,6 +198,7 @@ type ResourceAnalysis struct {
 	DataQuality     DataQuality      `json:"dataQuality"`
 	NoActionReason  Reason           `json:"noActionReason,omitempty"`
 	Notices         []Reason         `json:"notices,omitempty"`
+	OOMAdjustment   *OOMAdjustment   `json:"oomAdjustment,omitempty"`
 	RolloutFallback *RolloutFallback `json:"rolloutFallback,omitempty"`
 }
 
@@ -193,12 +213,26 @@ type RolloutFallback struct {
 	CurrentDataQuality   DataQuality `json:"currentDataQuality"`
 }
 
+// OOMAdjustment records memory sizing before bounds and material-change guards.
+// The request candidate is max(BaselineRequestBytes, OOMRequestFloorBytes).
+// Events without a known failed limit use the current finite memory limit,
+// then the current request, then qualifying usage. The fallback flags identify
+// which sources were used without presenting current settings as historical facts.
+// Presence does not promise an emitted recommendation: the remaining guards apply.
+type OOMAdjustment struct {
+	BaselineRequestBytes float64 `json:"baselineRequestBytes"`
+	OOMRequestFloorBytes float64 `json:"oomRequestFloorBytes"`
+	UsedUsageFallback    bool    `json:"usedUsageFallback"`
+	UsedCurrentFallback  bool    `json:"usedCurrentFallback,omitempty"`
+}
+
 type ResourceEvidence struct {
 	AggregatedUsage Signal          `json:"aggregatedUsage"`
 	CurrentRequest  Signal          `json:"currentRequest"`
 	CurrentLimit    Signal          `json:"currentLimit"`
 	Identity        CurrentIdentity `json:"identity"`
 	Inventory       Inventory       `json:"inventory"`
+	OOMKills        []OOMKill       `json:"oomKills,omitempty"`
 }
 type Setting string
 
@@ -248,6 +282,8 @@ const (
 	ReasonNoMaterialChange      Reason = "no-material-change"
 	ReasonBounds                Reason = "bound-applied"
 	ReasonLimitDisabled         Reason = "limit-changes-disabled"
+	ReasonOOMKillDetected       Reason = "oom-kill-detected"
+	ReasonOOMLimitUnknown       Reason = "unknown-oom-memory-limit"
 )
 
 type DataQuality struct {

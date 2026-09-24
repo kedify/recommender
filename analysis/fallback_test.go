@@ -141,3 +141,17 @@ func TestFallbackHandlesMissingCurrentSamplesWithoutBorrowingInventory(t *testin
 		t.Fatalf("historical pod counts authorized downsizing a currently unobserved pod: %+v", result)
 	}
 }
+
+func TestFallbackKeepsCurrentOOMProtection(t *testing.T) {
+	in := fallbackFixture()
+	c := &in.Containers[0]
+	c.PreviousReleases = []PreviousRelease{previousFixture("previous", epoch-60000, 7200, 30)}
+	c.OOMKills = []OOMKill{
+		{ID: "current-oom", WorkloadUID: "uid", Release: "A", Timestamp: in.EvaluationTime - 60000, MemoryLimitBytes: 1024 * 1024 * 1024},
+		{ID: "old-oom", WorkloadUID: "uid", Release: "previous", Timestamp: epoch - 120000, MemoryLimitBytes: 4 * 1024 * 1024 * 1024},
+	}
+	result := run(t, in, Policy{}).Results[0]
+	if result.RolloutFallback == nil || result.OOMAdjustment == nil || result.OOMAdjustment.OOMRequestFloorBytes != 1.5*1024*1024*1024 || len(result.Evidence.OOMKills) != 1 || result.Evidence.OOMKills[0].ID != "current-oom" {
+		t.Fatalf("fallback changed current OOM protection: %+v", result)
+	}
+}

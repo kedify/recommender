@@ -131,6 +131,19 @@ func TestUnsetSettingsPreserveGuards(t *testing.T) {
 	}
 }
 
+func TestUnsetMemoryLimitPreservesOOMGuard(t *testing.T) {
+	in, p, index, _ := unsetFixture(ResourceMemory)
+	in.Containers[0].OOMKills = []OOMKill{oomKill("unknown-limit", epoch+60000, 0)}
+	r := run(t, in, p).Results[index]
+	if len(r.Recommendations) != 1 || r.Recommendations[0].Setting != SettingRequests {
+		t.Fatalf("unsafe unset memory limit initialized after OOM: %+v", r)
+	}
+	trace := r.DecisionTrace.Settings[1]
+	if trace.Disposition != "retained" || len(trace.Reasons) != 1 || trace.Reasons[0] != ReasonOOMLimitUnknown {
+		t.Fatalf("missing OOM guard trace: %+v", trace)
+	}
+}
+
 func TestUnsetSignalRejectsNumericValue(t *testing.T) {
 	for _, limit := range []bool{false, true} {
 		in, p, _, _ := unsetFixture(ResourceCPU)

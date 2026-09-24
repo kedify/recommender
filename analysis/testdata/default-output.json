@@ -1,7 +1,7 @@
 {
   "schemaVersion": "resource-analysis-output/v3",
-  "detectorVersion": "7",
-  "policyVersion": "v2:5509b23e9c4314e2c5455ab47a985a8ba022812cb6904b593407df37908ae377",
+  "detectorVersion": "8",
+  "policyVersion": "v2:05fcc132cfc77a9510dabdd15412df2f86e5ee8b8c8c703ea3f3738423463a51",
   "effectivePolicy": {
     "cpu": {
       "strategy": "percentile",
@@ -19,6 +19,7 @@
     "memory": {
       "strategy": "max",
       "headroomCoefficient": 1.2,
+      "oomKilledCoefficient": 1.5,
       "limitsToRequestsRatio": 3,
       "bounds": {
         "minimum": 10485760,

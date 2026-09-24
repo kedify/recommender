@@ -16,7 +16,7 @@ output, err := analysis.Analyze(snapshot, policy)
 
 Callers fetch raw range vectors and map them into `analysis.Input`; calculations
 and CPU counter normalization happen in this package. Input schema v2 rejects v1
-input; results use output schema v3 and resource detector version 7. Consumers
+input; results use output schema v3 and resource detector version 8. Consumers
 should update generated output bindings and invalidate cached findings when upgrading.
 All timestamps are original Unix milliseconds, including current settings and
 identity. Do not stamp carried-forward values with query evaluation times. CPU
@@ -79,7 +79,7 @@ Historical evidence is evaluated at that time, capped at the current rollout's
 start, and retains its original timestamps. `rolloutFallback` in each resource
 result identifies the historical source and preserves the current rollout's
 failed data-quality checks. The result target, identity, allocation signals,
-and inventory checks remain current. Historical pod
+inventory checks and OOM events remain current. Historical pod
 counts cannot authorize downsizing currently unobserved pods. Existing callers
 that omit `previousReleases` keep current-rollout-only behavior.
 
@@ -96,8 +96,8 @@ from an observed numeric zero and from `Available: false` (unknown). The value
 must remain zero when `Unset` is true; it is a placeholder, not an allocation.
 Since detector version 7, initializing an unset setting bypasses absolute and
 relative minimum-change thresholds. Evidence, freshness, bounds, inventory,
-and requests-only guards still apply. In particular, introducing an unset
-limit still requires safe inventory evidence. Numeric signals that omit
+OOM and requests-only guards still apply. In particular, introducing an unset
+limit still requires safe inventory and OOM evidence. Numeric signals that omit
 `unset` retain their previous behavior, including explicit zero values.
 Recommendations mark such initialization with `currentUnset: true`; their
 `currentValue` is then only a placeholder. Decision traces record
@@ -111,6 +111,106 @@ the retained request. Every resource returns measured evidence and explicit qual
 reasons; an empty recommendation list always includes a no-action reason. Detector
 and normalized-policy identities are independent from schema versions. Consumers
 should pin a released module version and invalidate/recompute old findings.
+
+## OOM observations
+
+Callers may supply `ContainerObservation.OOMKills` as normalized positive OOM
+termination events. The engine has no metric names, PromQL, Kubernetes clients,
+or source-specific adapters. Each event has a stable `ID`, the original termination
+`Timestamp` in Unix milliseconds, `WorkloadUID`, `Release`, optional `PodUID`, and
+optional `MemoryLimitBytes` for the finite limit in effect at termination:
+
+```go
+container.OOMKills = []analysis.OOMKill{{
+    ID:               "pod-uid/app/1800000060000",
+    PodUID:           "pod-uid",
+    WorkloadUID:      container.Target.WorkloadUID,
+    Release:          container.Target.Release,
+    Timestamp:        1800000060000,
+    MemoryLimitBytes: 512 * 1024 * 1024,
+}}
+policy := analysis.DefaultPolicy()
+policy.Memory.OOMKilledCoefficient = 1.5 // Default: 50% increase after an OOM kill.
+```
+
+The adapter must establish the workload/release identity at the event time before
+assigning it to this container. Use zero or omit `MemoryLimitBytes` when the
+event-time limit is unknown or unlimited; do not substitute today's limit.
+Repeated scrapes of one termination retain the same event ID and timestamp.
+Identical events are deduplicated; conflicting observations sharing an ID are
+rejected. Events are sorted deterministically and input is not mutated.
+
+Only events within the requested window and selected workload UID/release segment
+affect memory. Events from before a rollback boundary or from another workload UID
+are excluded, as are future events. Event age is not current-signal freshness:
+a kill earlier in the selected history still matters even if its pod has gone.
+Events do not establish usage coverage. A verified current-release event can
+establish an inferred activation boundary when usage samples are absent; known
+activation boundaries and observed rollback boundaries still restrict events.
+
+For events with a known limit, the calculation follows KRR's memory rule:
+
+```text
+baseline = peak observed memory × memory.headroomCoefficient
+OOM floor = maximum event-time memory limit × memory.oomKilledCoefficient
+request candidate = max(baseline, OOM floor)
+```
+
+For example, a 512 MiB limit exceeded by an OOM produces a 768 MiB floor with the
+default coefficient. The normal memory limit/request ratio then applies; set
+`memory.limitsToRequestsRatio` to 1 for equal requests and limits, as in KRR.
+
+A timestamp-only event uses the current finite memory limit as its sizing base,
+then the current memory request if no finite limit is known, then qualifying
+usage as a final fallback. This is recorded as a fallback, never as the historical
+failed limit. The coefficient applies once; repeated events do not compound it.
+Unknown failed limits still block reductions and introduction of a finite limit,
+and produce `unknown-oom-memory-limit`. The largest event contribution wins.
+The coefficient must be finite and at least 1; zero selects the default 1.5.
+
+A current-release OOM with a positive sizing base authorizes memory increases
+without usage samples, minimum history, coverage, or fresh usage. Missing usage
+remains visible as partial data quality, and usage confidence is zero for this
+path. No reduction is authorized by insufficient usage. Identity, current-setting
+freshness, material-change, bounds, and request/limit consistency guards still
+apply. CPU sizing remains usage-based. Omitting the optional events preserves
+usage-based sizing; it does not assert that no kills occurred.
+
+Memory output includes:
+
+- `notices: ["oom-kill-detected"]` and `evidence.oomKills`, even if a guard blocks
+  recommendations. Detection by itself does not degrade data quality.
+- `oomAdjustment` when sizing is eligible: `baselineRequestBytes`,
+  `oomRequestFloorBytes`, `usedCurrentFallback`, and `usedUsageFallback` explain the calculation before
+  bounds and action filtering. The floor may already be below the baseline, or
+  bounds/material-change guards may prevent a resulting recommendation.
+- `effectivePolicy.memory.oomKilledCoefficient` records the effective multiplier.
+
+The OOM coefficient is included in the normalized policy hash. Consumers using
+this feature must pin a module version containing it and invalidate cached
+findings from older detectors/policies.
+
+### Adapter guidance
+
+- **Kedify agent:** `container_last_oom_kill_timestamp` stores the termination
+  time in its **value**, in Unix seconds. Convert that value to milliseconds;
+  the metric sample timestamp is the collection time. Use the `podUID`,
+  `workloadUID`, `workloadRevision`, and container labels to establish identity.
+  Construct a stable event ID from pod UID, container, and termination time.
+  The timestamp metric itself supplies no memory limit. Attach a limit only if
+  historical evidence establishes it at termination. Respect
+  `container_oom_collection_status`; absence of series under denied, unavailable,
+  or over-budget collection is not proof of zero kills.
+- **kube-state-metrics:** join a positive
+  `kube_pod_container_status_last_terminated_reason{reason="OOMKilled"}` with
+  `kube_pod_container_status_last_terminated_timestamp` for the same pod UID and
+  container, then convert its timestamp value to milliseconds. Resolve historical
+  owner/release identity and, if available, the memory resource limit at the event
+  time. A reason gauge alone does not establish the event time; do not stamp it
+  with each scrape time. See the [KSM pod metrics reference](https://github.com/kubernetes/kube-state-metrics/blob/main/docs/metrics/workload/pod-metrics.md).
+- **Other sources:** Kubernetes termination status, event stores, or offline JSON
+  may populate the same structure directly. Do not infer an OOM solely from a
+  restart count or exit code. Source collection and conversion belong to callers.
 
 ## Consumers
 

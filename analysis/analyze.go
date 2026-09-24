@@ -17,7 +17,7 @@ import (
 func DefaultPolicy() Policy {
 	return Policy{
 		CPU:      CPUPolicy{Strategy: CPUStrategyPercentile, Percentile: 95, HeadroomCoefficient: 3, LimitsToRequestsRatio: 5, Bounds: Bounds{Minimum: 20, Maximum: 64000, MinimumAbsoluteChange: 50, MinimumRelativeChange: .1}},
-		Memory:   MemoryPolicy{Strategy: MemoryStrategyMax, HeadroomCoefficient: 1.2, LimitsToRequestsRatio: 3, Bounds: Bounds{Minimum: 10 * 1024 * 1024, Maximum: 1024 * 1024 * 1024 * 1024, MinimumAbsoluteChange: 8 * 1024 * 1024, MinimumRelativeChange: .1}},
+		Memory:   MemoryPolicy{Strategy: MemoryStrategyMax, HeadroomCoefficient: 1.2, OOMKilledCoefficient: 1.5, LimitsToRequestsRatio: 3, Bounds: Bounds{Minimum: 10 * 1024 * 1024, Maximum: 1024 * 1024 * 1024 * 1024, MinimumAbsoluteChange: 8 * 1024 * 1024, MinimumRelativeChange: .1}},
 		Evidence: EvidencePolicy{MinimumHistorySeconds: 3600, MinimumSamples: 30, MinimumCoverage: .9, FreshnessSeconds: 300},
 	}
 }
@@ -36,6 +36,12 @@ func NormalizePolicy(p Policy) (Policy, error) {
 	}
 	if p.Memory.Strategy != MemoryStrategyMax {
 		return Policy{}, fmt.Errorf("unsupported memory.strategy %q", p.Memory.Strategy)
+	}
+	if p.Memory.OOMKilledCoefficient == 0 {
+		p.Memory.OOMKilledCoefficient = d.Memory.OOMKilledCoefficient
+	}
+	if !finite(p.Memory.OOMKilledCoefficient) || p.Memory.OOMKilledCoefficient < 1 {
+		return Policy{}, fmt.Errorf("memory.oomKilledCoefficient must be finite and at least one")
 	}
 	if p.CPU.Percentile == 0 {
 		p.CPU.Percentile = d.CPU.Percentile
@@ -210,6 +216,22 @@ func analyzeResource(in Input, c ContainerObservation, r Resource, p Policy) (Re
 	}
 	result.Evidence.AggregatedUsage = usage
 	usageBlocked := len(q.Reasons) > 0
+	oomLimitUnknown := false
+	if r == ResourceMemory {
+		kills, oomErr := selectOOMKills(in, c)
+		if oomErr != nil {
+			return ResourceAnalysis{}, oomErr
+		}
+		result.Evidence.OOMKills = kills
+		if len(kills) > 0 {
+			result.Notices = append(result.Notices, ReasonOOMKillDetected)
+		}
+		for _, kill := range kills {
+			if kill.MemoryLimitBytes == 0 {
+				oomLimitUnknown = true
+			}
+		}
+	}
 	requestOK, limitOK := true, true
 	for _, s := range []struct {
 		value        Signal
@@ -248,19 +270,56 @@ func analyzeResource(in Input, c ContainerObservation, r Resource, p Policy) (Re
 		addReason(q, ReasonIncompleteInventory)
 		inventoryOK = false
 	}
-	if identityBlocked || usageBlocked || !requestOK {
+	if oomLimitUnknown {
+		addReason(q, ReasonOOMLimitUnknown)
+	}
+	// OOM evidence can size memory independently of usage history. Keep the
+	// missing-usage reasons as partial evidence, rather than inventing samples.
+	rawSuggestedRequest := 0.0
+	if !usageBlocked {
+		rawSuggestedRequest = usage.Value * headroom
+	}
+	if !finite(rawSuggestedRequest) {
+		return ResourceAnalysis{}, fmt.Errorf("suggested value overflow")
+	}
+	var adjustment *OOMAdjustment
+	if !identityBlocked && requestOK && len(result.Evidence.OOMKills) > 0 {
+		currentBase := obs.CurrentRequest.Value
+		if limitOK && obs.CurrentLimit.Value > 0 {
+			currentBase = obs.CurrentLimit.Value
+		}
+		value, oomErr := oomAdjustment(result.Evidence.OOMKills, rawSuggestedRequest, currentBase, p.Memory.OOMKilledCoefficient)
+		if oomErr != nil {
+			return ResourceAnalysis{}, oomErr
+		}
+		if value.OOMRequestFloorBytes > 0 {
+			adjustment = &value
+		}
+	}
+	if identityBlocked || !requestOK || (usageBlocked && adjustment == nil) {
 		q.Status = DataQualityUnavailable
 		result.NoActionReason = q.Reasons[0]
 		requestTrace.stop("unavailable", q.Reasons...)
 		limitTrace.stop("unavailable", q.Reasons...)
 		return result, nil
 	}
-	rawSuggestedRequest := usage.Value * headroom
-	if !finite(rawSuggestedRequest) {
-		return ResourceAnalysis{}, fmt.Errorf("suggested value overflow")
+	if !usageBlocked {
+		requestTrace.step("usage × headroom", map[string]float64{"usage": usage.Value, "coefficient": headroom, "candidate": rawSuggestedRequest})
+	} else {
+		confidence = 0 // There is no qualifying usage history to score.
+		latest := result.Evidence.OOMKills[len(result.Evidence.OOMKills)-1]
+		trace.Source = UsageSource{Release: c.Target.Release, PodUID: latest.PodUID, Timestamp: latest.Timestamp, Method: "OOM kill"}
+		requestTrace.step("OOM sizing without usage history", nil)
 	}
-	requestTrace.step("usage × headroom", map[string]float64{"usage": usage.Value, "coefficient": headroom, "candidate": rawSuggestedRequest})
+	if adjustment != nil {
+		result.OOMAdjustment = adjustment
+		rawSuggestedRequest = math.Max(rawSuggestedRequest, adjustment.OOMRequestFloorBytes)
+		requestTrace.step("OOM floor", map[string]float64{"baseline": adjustment.BaselineRequestBytes, "floor": adjustment.OOMRequestFloorBytes, "candidate": rawSuggestedRequest, "coefficient": p.Memory.OOMKilledCoefficient})
+	}
 	suggestedRequest := math.Max(bounds.Minimum, math.Min(bounds.Maximum, rawSuggestedRequest))
+	if usageBlocked {
+		suggestedRequest = math.Max(suggestedRequest, obs.CurrentRequest.Value)
+	}
 	requestTrace.step("request bounds", map[string]float64{"before": rawSuggestedRequest, "minimum": bounds.Minimum, "maximum": bounds.Maximum, "candidate": suggestedRequest})
 	requestBounded := suggestedRequest != rawSuggestedRequest
 	boundsSuppressedAction := requestBounded && isMaterial(obs.CurrentRequest, rawSuggestedRequest, bounds) && !isMaterial(obs.CurrentRequest, suggestedRequest, bounds)
@@ -274,6 +333,9 @@ func analyzeResource(in Input, c ContainerObservation, r Resource, p Policy) (Re
 			return ResourceAnalysis{}, fmt.Errorf("suggested value overflow")
 		}
 		suggestedLimit = math.Max(suggestedRequest, math.Min(bounds.Maximum, rawSuggestedLimit))
+		if usageBlocked && limitOK {
+			suggestedLimit = math.Max(suggestedLimit, obs.CurrentLimit.Value)
+		}
 		limitTrace.step("request × limit ratio", map[string]float64{"request": suggestedRequest, "ratio": ratio, "candidate": rawSuggestedLimit})
 		limitTrace.step("limit bounds", map[string]float64{"before": rawSuggestedLimit, "minimum": suggestedRequest, "maximum": bounds.Maximum, "candidate": suggestedLimit})
 		limitBounded := suggestedLimit != rawSuggestedLimit
@@ -320,11 +382,11 @@ func analyzeResource(in Input, c ContainerObservation, r Resource, p Policy) (Re
 			}
 		}
 		if s.suggested < s.current.Value || (s.setting == SettingLimits && s.current.Value == 0) {
-			settingTrace.guard("safe reduction or introduction of limit", inventoryOK, nil)
+			settingTrace.guard("safe reduction or introduction of limit", inventoryOK && !oomLimitUnknown, nil)
 		}
-		if (s.suggested < s.current.Value || (s.setting == SettingLimits && s.current.Value == 0)) && !inventoryOK {
+		if (s.suggested < s.current.Value || (s.setting == SettingLimits && s.current.Value == 0)) && (!inventoryOK || oomLimitUnknown) {
 			for _, reason := range q.Reasons {
-				if reason == ReasonUnknownInventory || reason == ReasonStaleInventory || reason == ReasonIncompleteInventory || reason == ReasonExcludedContainers {
+				if reason == ReasonUnknownInventory || reason == ReasonStaleInventory || reason == ReasonIncompleteInventory || reason == ReasonExcludedContainers || reason == ReasonOOMLimitUnknown {
 					settingTrace.Reasons = append(settingTrace.Reasons, reason)
 				}
 			}
@@ -367,7 +429,7 @@ func analyzeResource(in Input, c ContainerObservation, r Resource, p Policy) (Re
 	if len(result.Recommendations) == 0 {
 		if downsizeSuppressed {
 			for _, reason := range q.Reasons {
-				if reason == ReasonUnknownInventory || reason == ReasonStaleInventory || reason == ReasonIncompleteInventory || reason == ReasonExcludedContainers {
+				if reason == ReasonUnknownInventory || reason == ReasonStaleInventory || reason == ReasonIncompleteInventory || reason == ReasonExcludedContainers || reason == ReasonOOMLimitUnknown {
 					result.NoActionReason = reason
 					break
 				}
@@ -592,6 +654,13 @@ func selectReleaseSegment(in Input, c ContainerObservation) ContainerObservation
 					boundary = v.Timestamp
 				}
 			}
+		}
+	}
+	// A verified current-rollout OOM also proves the rollout was active at
+	// that instant, including containers that died before their first scrape.
+	for _, kill := range c.OOMKills {
+		if kill.WorkloadUID == c.Target.WorkloadUID && kill.Release == c.Target.Release && kill.Timestamp > cutoff && kill.Timestamp <= in.EvaluationTime && (boundary == 0 || kill.Timestamp < boundary) {
+			boundary = kill.Timestamp
 		}
 	}
 	if boundary == 0 && cutoff >= in.WindowStart {
