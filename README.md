@@ -15,13 +15,16 @@ output, err := analysis.Analyze(snapshot, policy)
 ```
 
 Callers fetch raw range vectors and map them into `analysis.Input`; calculations
-and CPU counter normalization happen in this package. Schema v2 rejects v1 input.
+and CPU counter normalization happen in this package. Input schema v2 rejects v1
+input; results use output schema v3 and resource detector version 7. Consumers
+should update generated output bindings and invalidate cached findings when upgrading.
 All timestamps are original Unix milliseconds, including current settings and
 identity. Do not stamp carried-forward values with query evaluation times. CPU
 gauges use millicores, memory uses bytes, and `cpu-counter-seconds` uses cumulative
 CPU seconds. Adjacent counter observations become millicores using delta / elapsed
-seconds × 1000; resets use the post-reset counter value. Intervals longer than the
-maximum gap are omitted rather than averaged into deceptively small rates.
+seconds × 1000; resets use the post-reset counter value. These are interval-average
+rates, including across collection outages; no intermediate observations are
+invented, and missing measurements reduce coverage.
 
 Group observations by namespace, workload kind/name and container. The target and
 current identity select one workload UID and release. Keep other releases in raw
@@ -41,21 +44,44 @@ from metrics alone. An authoritative activation boundary is needed to resolve th
 source limitation. Deleted/recreated workload UIDs are never pooled.
 
 Each resource independently reports observed start/end, distinct sample count,
-series count, inferred median cadence, gap count, maximum gap and coverage. Coverage
+series count, inferred median cadence and coverage. Coverage
 is the union of observed timestamps for the current release across pod lifetimes,
 divided by the selected release segment duration rather than pre-release lookback,
 with intervals capped at the median source cadence and one cadence of edge
 tolerance. Healthy scale-out or pod replacement retains established release history.
-Sample count reports all distinct per-series samples; confidence uses unique release
+`sampleCount` reports all distinct per-series samples; `observationCount` reports
+distinct timestamps across series after normalization (including CPU counter
+conversion) and is the count checked against `minimumSamples`. Confidence uses unique release
 timestamps, measured release history and coverage and is capped at 95. It is also
 capped by the history, sample count and coverage of the series supplying the sizing
 value; a newly busy replica can justify growth without borrowing another replica's
-confidence. Equal sizing values use the strongest independently supporting series. Internal
-series gaps remain visible; only fresh observed pods count against current inventory. Long gaps,
-stale samples and insufficient history block sizing. The default minimum history
-is seven days; shortening a query does not shorten that safety guard. A caller can
-explicitly choose another minimum through the effective policy; automatic seasonal
-detection is outside this package.
+confidence. Equal sizing values use the strongest independently supporting series.
+Only fresh observed pods count against current inventory. Stale samples,
+insufficient history, too few samples and insufficient overall coverage block
+sizing; an isolated collection outage does not independently veto a recommendation.
+The defaults require one hour of observed history, 30 distinct observation times,
+90% coverage, and observations no older than five minutes. One hour of minute-level
+scrapes can qualify, including modest gaps within the coverage guard. Shortening a
+query does not shorten the history guard. A caller can explicitly choose other
+minimums through the effective policy; automatic seasonal detection is outside
+this package.
+
+Callers may supply `previousReleases`, ordered newest to oldest, on a container
+observation. CPU and memory independently fall back when the current rollout has
+missing usage, insufficient history, or insufficient samples. At most the first
+three previous rollouts are examined. The first candidate passing all usage
+quality checks wins; samples from different rollouts are never pooled. An
+eligible current rollout always wins, including when it needs no material change.
+
+Each previous rollout supplies its release ID, raw CPU/memory series, and the last
+historical evaluation time; an optional activation boundary can be provided.
+Historical evidence is evaluated at that time, capped at the current rollout's
+start, and retains its original timestamps. `rolloutFallback` in each resource
+result identifies the historical source and preserves the current rollout's
+failed data-quality checks. The result target, identity, allocation signals,
+and inventory checks remain current. Historical pod
+counts cannot authorize downsizing currently unobserved pods. Existing callers
+that omit `previousReleases` keep current-rollout-only behavior.
 
 Inventory counts must describe the selected UID/release/container: eligible,
 observed eligible, and excluded containers. Mark inventory unavailable when the
@@ -63,6 +89,19 @@ source cannot supply that denominator. Unknown, stale, incomplete or excluded
 inventory blocks downsizing, including introducing a limit where zero means no
 limit. Well-covered usage can still justify growth with partial quality. Inconsistent
 current settings across replicas must be marked unavailable by the adapter.
+
+For a current request or limit that is known to be absent, supply
+`Signal{Available: true, Unset: true, Timestamp: observedAt}`. This is distinct
+from an observed numeric zero and from `Available: false` (unknown). The value
+must remain zero when `Unset` is true; it is a placeholder, not an allocation.
+Since detector version 7, initializing an unset setting bypasses absolute and
+relative minimum-change thresholds. Evidence, freshness, bounds, inventory,
+and requests-only guards still apply. In particular, introducing an unset
+limit still requires safe inventory evidence. Numeric signals that omit
+`unset` retain their previous behavior, including explicit zero values.
+Recommendations mark such initialization with `currentUnset: true`; their
+`currentValue` is then only a placeholder. Decision traces record
+`initialize unset setting` instead of a change from zero.
 
 Effective policy contains CPU percentile/max, headroom, request/limit ratios,
 request-only behavior, resource bounds, material-change thresholds and evidence
@@ -100,3 +139,18 @@ subscribers may privately modify and compile covered source.
 
 Include both Kedify texts and applicable third-party notices in distributions.
 Submitted code requires a signed contribution assignment before acceptance.
+
+### Decision traces and chart normalization
+
+Resource analyses include an additive `decisionTrace` (version `1`) from detector
+version `6`. It records the winning series/pod, aggregation method and source time,
+previous-rollout attempts and rejections, and each request/limit calculation and
+executed guard. Setting dispositions distinguish `recommended`, `retained`,
+`disabled`, and `unavailable`. Numeric calculation values use the resource's native
+units (CPU millicores, memory bytes); coefficients and relative changes are ratios.
+Traces do not change sizing behavior or contain raw samples.
+
+`analysis.NormalizeSamples(series, start, end)` exposes the same sample conversion
+used by sizing, including CPU counter resets, duplicate handling, and timestamp
+filtering. Chart consumers should use it before display-only downsampling; never
+recompute recommendations from reduced chart data.

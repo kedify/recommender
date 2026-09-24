@@ -7,8 +7,9 @@ package analysis
 
 const (
 	InputSchemaVersion               = "resource-analysis-input/v2"
-	OutputSchemaVersion              = "resource-analysis-output/v2"
-	ResourceRightSizeDetectorVersion = "2"
+	OutputSchemaVersion              = "resource-analysis-output/v3"
+	ResourceRightSizeDetectorVersion = "7"
+	MaxPreviousReleases              = 3
 )
 
 // All timestamps are Unix milliseconds. Observation timestamps retain the source
@@ -33,6 +34,20 @@ type ContainerObservation struct {
 	Inventory Inventory           `json:"inventory"`
 	CPU       ResourceObservation `json:"cpu"`
 	Memory    ResourceObservation `json:"memory"`
+	// Newest first. Only the first three entries are eligible as fallback usage.
+	PreviousReleases []PreviousRelease `json:"previousReleases,omitempty"`
+}
+
+// PreviousRelease supplies raw usage from an earlier rollout of this workload.
+// EvaluationTime is the last historical observation, not today's timestamp.
+// ReleaseStartedAt may be zero to infer the observed segment. Current settings
+// and inventory always refer to the current rollout.
+type PreviousRelease struct {
+	Release          string   `json:"release"`
+	ReleaseStartedAt int64    `json:"releaseStartedAt,omitempty"`
+	EvaluationTime   int64    `json:"evaluationTime"`
+	CPU              []Series `json:"cpu"`
+	Memory           []Series `json:"memory"`
 }
 
 // ReleaseStartedAt is an activation boundary or a conservative observed segment
@@ -84,12 +99,17 @@ type Sample struct {
 	Value     float64 `json:"value"`
 }
 
-// Signal distinguishes observed zero from missing. The timestamp is the source
-// observation time; adapters mark inconsistent replica settings unavailable.
+// Signal distinguishes observed zero, known unset allocations, and missing data.
+// For current requests/limits, Available=true with Unset=true means the setting
+// was observed to be absent; Value must be zero and is not a numeric allocation.
+// Unset defaults to false so existing numeric signals keep their meaning.
+// The timestamp is the source observation time; adapters mark inconsistent
+// replica settings unavailable.
 // Aggregated usage retains the selected sample's timestamp (the interval end for
 // a CPU rate). DataQuality.ObservedEnd separately reports the latest usable sample.
 type Signal struct {
 	Available bool    `json:"available"`
+	Unset     bool    `json:"unset,omitempty"`
 	Value     float64 `json:"value"`
 	Timestamp int64   `json:"timestamp"`
 }
@@ -113,7 +133,6 @@ type EvidencePolicy struct {
 	MinimumHistorySeconds int64   `json:"minimumHistorySeconds"`
 	MinimumSamples        int     `json:"minimumSamples"`
 	MinimumCoverage       float64 `json:"minimumCoverage"`
-	MaximumGapSeconds     int64   `json:"maximumGapSeconds"`
 	FreshnessSeconds      int64   `json:"freshnessSeconds"`
 }
 type Bounds struct {
@@ -152,13 +171,28 @@ const (
 )
 
 type ResourceAnalysis struct {
+	DecisionTrace   *DecisionTrace   `json:"decisionTrace,omitempty"`
 	Target          Target           `json:"target"`
 	Resource        Resource         `json:"resource"`
 	Recommendations []Recommendation `json:"recommendations,omitempty"`
 	Evidence        ResourceEvidence `json:"evidence"`
 	DataQuality     DataQuality      `json:"dataQuality"`
 	NoActionReason  Reason           `json:"noActionReason,omitempty"`
+	Notices         []Reason         `json:"notices,omitempty"`
+	RolloutFallback *RolloutFallback `json:"rolloutFallback,omitempty"`
 }
+
+// RolloutFallback identifies historical usage used to size the current target.
+// DataQuality and AggregatedUsage describe this source; CurrentDataQuality
+// preserves the reason current-rollout usage was insufficient.
+type RolloutFallback struct {
+	Release              string      `json:"release"`
+	ReleaseStartedAt     int64       `json:"releaseStartedAt"`
+	ReleaseStartInferred bool        `json:"releaseStartInferred"`
+	EvaluationTime       int64       `json:"evaluationTime"`
+	CurrentDataQuality   DataQuality `json:"currentDataQuality"`
+}
+
 type ResourceEvidence struct {
 	AggregatedUsage Signal          `json:"aggregatedUsage"`
 	CurrentRequest  Signal          `json:"currentRequest"`
@@ -174,8 +208,10 @@ const (
 )
 
 type Recommendation struct {
-	Setting        Setting `json:"setting"`
-	CurrentValue   float64 `json:"currentValue"`
+	Setting      Setting `json:"setting"`
+	CurrentValue float64 `json:"currentValue"`
+	// CurrentUnset means CurrentValue is a placeholder, not an observed zero.
+	CurrentUnset   bool    `json:"currentUnset,omitempty"`
 	SuggestedValue float64 `json:"suggestedValue"`
 	Confidence     int     `json:"confidence"`
 }
@@ -200,7 +236,6 @@ const (
 	ReasonInsufficientHistory   Reason = "insufficient-history"
 	ReasonInsufficientSamples   Reason = "insufficient-samples"
 	ReasonSparseCoverage        Reason = "sparse-coverage"
-	ReasonInterruptedHistory    Reason = "interrupted-history"
 	ReasonStaleUsage            Reason = "stale-usage"
 	ReasonMissingRequest        Reason = "missing-current-request"
 	ReasonStaleRequest          Reason = "stale-current-request"
@@ -216,15 +251,16 @@ const (
 )
 
 type DataQuality struct {
-	Status                DataQualityStatus `json:"status"`
-	ObservedStart         int64             `json:"observedStart"`
-	ObservedEnd           int64             `json:"observedEnd"`
-	SampleCount           int               `json:"sampleCount"`
-	SeriesCount           int               `json:"seriesCount"`
-	CadenceSeconds        float64           `json:"cadenceSeconds"`
-	GapCount              int               `json:"gapCount"`
-	MaximumGapSeconds     float64           `json:"maximumGapSeconds"`
-	Coverage              float64           `json:"coverage"`
-	ObservedIntervalHours float64           `json:"observedIntervalHours"`
-	Reasons               []Reason          `json:"reasons"`
+	Status        DataQualityStatus `json:"status"`
+	ObservedStart int64             `json:"observedStart"`
+	ObservedEnd   int64             `json:"observedEnd"`
+	SampleCount   int               `json:"sampleCount"`
+	// ObservationCount counts distinct timestamps across series after normalization,
+	// including CPU counter conversion. MinimumSamples applies to this count.
+	ObservationCount      int      `json:"observationCount"`
+	SeriesCount           int      `json:"seriesCount"`
+	CadenceSeconds        float64  `json:"cadenceSeconds"`
+	Coverage              float64  `json:"coverage"`
+	ObservedIntervalHours float64  `json:"observedIntervalHours"`
+	Reasons               []Reason `json:"reasons"`
 }
