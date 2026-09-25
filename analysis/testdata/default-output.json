@@ -1,7 +1,7 @@
 {
-  "schemaVersion": "resource-analysis-output/v2",
-  "detectorVersion": "2",
-  "policyVersion": "v2:4ee0c63f2f57b6a5be6984cb78619879194d3200e9288b28c4a4bd247f4029d7",
+  "schemaVersion": "resource-analysis-output/v3",
+  "detectorVersion": "8",
+  "policyVersion": "v2:05fcc132cfc77a9510dabdd15412df2f86e5ee8b8c8c703ea3f3738423463a51",
   "effectivePolicy": {
     "cpu": {
       "strategy": "percentile",
@@ -19,6 +19,7 @@
     "memory": {
       "strategy": "max",
       "headroomCoefficient": 1.2,
+      "oomKilledCoefficient": 1.5,
       "limitsToRequestsRatio": 3,
       "bounds": {
         "minimum": 10485760,
@@ -32,12 +33,117 @@
       "minimumHistorySeconds": 600,
       "minimumSamples": 10,
       "minimumCoverage": 0.9,
-      "maximumGapSeconds": 300,
       "freshnessSeconds": 300
     }
   },
   "results": [
     {
+      "decisionTrace": {
+        "version": "1",
+        "source": {
+          "release": "A",
+          "seriesID": "pod-1",
+          "podUID": "pod-1",
+          "timestamp": 1800000233127,
+          "method": "maximum"
+        },
+        "settings": [
+          {
+            "setting": "requests",
+            "disposition": "recommended",
+            "steps": [
+              {
+                "rule": "usage × headroom",
+                "values": {
+                  "candidate": 125829120,
+                  "coefficient": 1.2,
+                  "usage": 104857600
+                }
+              },
+              {
+                "rule": "request bounds",
+                "values": {
+                  "before": 125829120,
+                  "candidate": 125829120,
+                  "maximum": 1099511627776,
+                  "minimum": 10485760
+                }
+              },
+              {
+                "rule": "safe reduction or introduction of limit",
+                "passed": true
+              },
+              {
+                "rule": "request fits retained or changing limit",
+                "values": {
+                  "candidate": 125829120,
+                  "currentLimit": 536870912
+                },
+                "passed": true
+              },
+              {
+                "rule": "material change",
+                "values": {
+                  "absoluteChange": 142606336,
+                  "candidate": 125829120,
+                  "current": 268435456,
+                  "minimumAbsoluteChange": 8388608,
+                  "minimumRelativeChange": 0.1,
+                  "relativeChange": 0.53125
+                },
+                "passed": true
+              }
+            ]
+          },
+          {
+            "setting": "limits",
+            "disposition": "recommended",
+            "steps": [
+              {
+                "rule": "request × limit ratio",
+                "values": {
+                  "candidate": 377487360,
+                  "ratio": 3,
+                  "request": 125829120
+                }
+              },
+              {
+                "rule": "limit bounds",
+                "values": {
+                  "before": 377487360,
+                  "candidate": 377487360,
+                  "maximum": 1099511627776,
+                  "minimum": 125829120
+                }
+              },
+              {
+                "rule": "limit covers retained request",
+                "values": {
+                  "candidate": 377487360,
+                  "retainedRequest": 125829120
+                },
+                "passed": true
+              },
+              {
+                "rule": "safe reduction or introduction of limit",
+                "passed": true
+              },
+              {
+                "rule": "material change",
+                "values": {
+                  "absoluteChange": 159383552,
+                  "candidate": 377487360,
+                  "current": 536870912,
+                  "minimumAbsoluteChange": 8388608,
+                  "minimumRelativeChange": 0.1,
+                  "relativeChange": 0.296875
+                },
+                "passed": true
+              }
+            ]
+          }
+        ]
+      },
       "target": {
         "namespace": "shop",
         "kind": "Deployment",
@@ -99,16 +205,122 @@
         "observedStart": 1800000000000,
         "observedEnd": 1800000600000,
         "sampleCount": 12,
+        "observationCount": 12,
         "seriesCount": 1,
         "cadenceSeconds": 60,
-        "gapCount": 0,
-        "maximumGapSeconds": 60,
         "coverage": 1,
         "observedIntervalHours": 0.16666666666666666,
         "reasons": []
       }
     },
     {
+      "decisionTrace": {
+        "version": "1",
+        "source": {
+          "release": "A",
+          "seriesID": "pod-1",
+          "podUID": "pod-1",
+          "timestamp": 1800000300000,
+          "method": "maximum of per-series nearest-rank percentiles",
+          "percentile": 50
+        },
+        "settings": [
+          {
+            "setting": "requests",
+            "disposition": "recommended",
+            "steps": [
+              {
+                "rule": "usage × headroom",
+                "values": {
+                  "candidate": 150,
+                  "coefficient": 3,
+                  "usage": 50
+                }
+              },
+              {
+                "rule": "request bounds",
+                "values": {
+                  "before": 150,
+                  "candidate": 150,
+                  "maximum": 64000,
+                  "minimum": 20
+                }
+              },
+              {
+                "rule": "safe reduction or introduction of limit",
+                "passed": true
+              },
+              {
+                "rule": "request fits retained or changing limit",
+                "values": {
+                  "candidate": 150,
+                  "currentLimit": 4000
+                },
+                "passed": true
+              },
+              {
+                "rule": "material change",
+                "values": {
+                  "absoluteChange": 850,
+                  "candidate": 150,
+                  "current": 1000,
+                  "minimumAbsoluteChange": 50,
+                  "minimumRelativeChange": 0.1,
+                  "relativeChange": 0.85
+                },
+                "passed": true
+              }
+            ]
+          },
+          {
+            "setting": "limits",
+            "disposition": "recommended",
+            "steps": [
+              {
+                "rule": "request × limit ratio",
+                "values": {
+                  "candidate": 750,
+                  "ratio": 5,
+                  "request": 150
+                }
+              },
+              {
+                "rule": "limit bounds",
+                "values": {
+                  "before": 750,
+                  "candidate": 750,
+                  "maximum": 64000,
+                  "minimum": 150
+                }
+              },
+              {
+                "rule": "limit covers retained request",
+                "values": {
+                  "candidate": 750,
+                  "retainedRequest": 150
+                },
+                "passed": true
+              },
+              {
+                "rule": "safe reduction or introduction of limit",
+                "passed": true
+              },
+              {
+                "rule": "material change",
+                "values": {
+                  "absoluteChange": 3250,
+                  "candidate": 750,
+                  "current": 4000,
+                  "minimumAbsoluteChange": 50,
+                  "minimumRelativeChange": 0.1,
+                  "relativeChange": 0.8125
+                },
+                "passed": true
+              }
+            ]
+          }
+        ]
+      },
       "target": {
         "namespace": "shop",
         "kind": "Deployment",
@@ -170,10 +382,9 @@
         "observedStart": 1800000000000,
         "observedEnd": 1800000600000,
         "sampleCount": 11,
+        "observationCount": 11,
         "seriesCount": 1,
         "cadenceSeconds": 60,
-        "gapCount": 0,
-        "maximumGapSeconds": 60,
         "coverage": 1,
         "observedIntervalHours": 0.16666666666666666,
         "reasons": []

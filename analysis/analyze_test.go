@@ -103,12 +103,12 @@ func TestRawOffGridPeakAndCPUPercentile(t *testing.T) {
 		t.Fatal("offline/connected normalized results differ")
 	}
 }
-func TestWeeklyDefaultAndMeasuredCoverage(t *testing.T) {
+func TestHourlyDefaultAndMeasuredCoverage(t *testing.T) {
 	tests := []struct {
 		name   string
 		in     Input
 		reason Reason
-	}{{"three quiet days", fixture(3*86400, 60), ReasonInsufficientHistory}, {"sparse week", fixture(7*86400, 86400), ReasonInsufficientSamples}, {"stable week", fixture(7*86400, 60), ""}}
+	}{{"half an hour", fixture(1800, 10), ReasonInsufficientHistory}, {"one hour", fixture(3600, 60), ""}, {"sparse week", fixture(7*86400, 86400), ReasonInsufficientSamples}, {"stable week", fixture(7*86400, 60), ""}}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			out := run(t, tt.in, Policy{})
@@ -119,7 +119,7 @@ func TestWeeklyDefaultAndMeasuredCoverage(t *testing.T) {
 					}
 				} else {
 					if len(r.Recommendations) == 0 || r.Recommendations[0].Confidence > 95 {
-						t.Fatalf("stable week should size with capped confidence: %+v", r)
+						t.Fatalf("sufficient history should size with capped confidence: %+v", r)
 					}
 				}
 			}
@@ -133,6 +133,63 @@ func TestWeeklyDefaultAndMeasuredCoverage(t *testing.T) {
 		t.Fatal("requested lookback substituted for observed CPU history or memory blocked")
 	}
 }
+
+func TestHourlyDefaultWithNativeMinuteScrapes(t *testing.T) {
+	for _, missing := range []int{0, 3, 10} {
+		t.Run(fmt.Sprintf("%d missing scrapes", missing), func(t *testing.T) {
+			in := fixture(3600, 60)
+			c := &in.Containers[0]
+			c.CPU.Series[0].Kind = SampleCPUCounterSeconds
+			for _, s := range []*Series{&c.CPU.Series[0], &c.Memory.Series[0]} {
+				var samples []Sample
+				for i, sample := range s.Samples {
+					if s.Kind == SampleCPUCounterSeconds {
+						sample.Value = float64(i) * 12 // 200 millicores.
+					}
+					if i > 0 && i%5 == 0 && i/5 <= missing {
+						continue
+					}
+					samples = append(samples, sample)
+				}
+				s.Samples = samples
+			}
+			for _, r := range run(t, in, Policy{}).Results {
+				wantCount := 61 - missing
+				if r.Resource == ResourceCPU {
+					wantCount-- // The first counter sample has no preceding interval.
+				}
+				if r.DataQuality.ObservationCount != wantCount || has(r.DataQuality, ReasonInsufficientSamples) || has(r.DataQuality, ReasonInsufficientHistory) {
+					t.Fatalf("one hour was blocked by history or sample count: %+v", r)
+				}
+				if missing == 10 {
+					if !has(r.DataQuality, ReasonSparseCoverage) || len(r.Recommendations) != 0 {
+						t.Fatalf("lower sample minimum bypassed coverage guard: %+v", r)
+					}
+				} else if r.DataQuality.Status == DataQualityUnavailable || len(r.Recommendations) == 0 {
+					t.Fatalf("one hour of minute scrapes should qualify: %+v", r)
+				}
+			}
+		})
+	}
+}
+
+func TestObservationCountUsesDistinctTimestampsAcrossReplicas(t *testing.T) {
+	in := fixture(3600, 60)
+	for _, obs := range []*ResourceObservation{&in.Containers[0].CPU, &in.Containers[0].Memory} {
+		other := obs.Series[0]
+		other.ID, other.PodUID = "pod-2", "pod-2"
+		obs.Series = append(obs.Series, other)
+	}
+	in.Containers[0].Inventory.Eligible, in.Containers[0].Inventory.Observed = 2, 2
+	p := DefaultPolicy()
+	p.Evidence.MinimumSamples = 100
+	for _, r := range run(t, in, p).Results {
+		if r.DataQuality.SampleCount != 122 || r.DataQuality.ObservationCount != 61 || !has(r.DataQuality, ReasonInsufficientSamples) || len(r.Recommendations) != 0 {
+			t.Fatalf("concurrent replica samples bypassed the explicit observation minimum: %+v", r)
+		}
+	}
+}
+
 func TestReleaseIdentityPartitions(t *testing.T) {
 	for _, mode := range []string{"old-new", "rollback", "recreated", "mixed", "stale-identity", "mismatch", "unknown"} {
 		t.Run(mode, func(t *testing.T) {
@@ -252,66 +309,59 @@ func TestCurrentEvidenceMustBelongToSelectedRelease(t *testing.T) {
 	}
 }
 
-func TestCounterGapSurvivesDiscardedRate(t *testing.T) {
+func TestCounterSamplesAcrossCollectionOutage(t *testing.T) {
 	for _, terminal := range []bool{false, true} {
 		t.Run(map[bool]string{false: "internal", true: "terminal"}[terminal], func(t *testing.T) {
-			in := fixture(1200, 60)
+			in := fixture(86400, 60)
 			s := &in.Containers[0].CPU.Series[0]
 			s.Kind = SampleCPUCounterSeconds
 			for i := range s.Samples {
 				s.Samples[i].Value = float64(i) * .6
 			}
 			if terminal {
-				s.Samples = append(s.Samples[:19], s.Samples[20]) // Last raw interval is 120 seconds.
+				s.Samples = append(s.Samples[:len(s.Samples)-15], s.Samples[len(s.Samples)-1])
 			} else {
-				s.Samples = append(s.Samples[:10], s.Samples[11:]...)
+				s.Samples = append(s.Samples[:600], s.Samples[614:]...)
 			}
 			p := shortPolicy()
-			p.Evidence.MaximumGapSeconds = 90
-			p.Evidence.FreshnessSeconds = 300
 			r := run(t, in, p).Results[1]
-			if r.DataQuality.MaximumGapSeconds != 120 || r.DataQuality.GapCount != 1 || !has(r.DataQuality, ReasonInterruptedHistory) {
-				t.Fatalf("discarded rate hid or duplicated the raw counter gap: %+v", r.DataQuality)
+			if len(r.Recommendations) == 0 || len(r.DataQuality.Reasons) != 0 || math.Abs(r.Evidence.AggregatedUsage.Value-10) > 1e-9 {
+				t.Fatalf("collection outage prevented sizing or changed elapsed-time CPU rates: %+v", r)
 			}
-			if len(r.Recommendations) != 0 || r.NoActionReason != ReasonInterruptedHistory || has(r.DataQuality, ReasonStaleUsage) || has(r.DataQuality, ReasonSparseCoverage) {
-				t.Fatalf("raw counter gap must independently block otherwise fresh, covered usage: %+v", r)
+			if r.DataQuality.Coverage >= 1 || r.DataQuality.Coverage < .98 || r.DataQuality.SampleCount != len(s.Samples)-1 {
+				t.Fatalf("missing samples were invented or counter endpoints discarded: %+v", r.DataQuality)
 			}
 		})
 	}
 }
 
-func TestReleaseGapAcrossPodLifetimesIsReported(t *testing.T) {
-	in := fixture(660, 60)
+func TestReleaseReplacementToleratesCollectionOutage(t *testing.T) {
+	in := fixture(86400, 60)
 	c := &in.Containers[0]
-	first := c.CPU.Series[0]
-	first.ID, first.PodUID = "old-pod", "old-pod"
-	first.Samples = []Sample{{Timestamp: epoch, Value: 10}, {Timestamp: epoch + 60_000, Value: 10}}
-	second := first
-	second.ID, second.PodUID = "new-pod", "new-pod"
-	second.Samples = []Sample{{Timestamp: epoch + 600_000, Value: 10}, {Timestamp: epoch + 660_000, Value: 10}}
-	c.CPU.Series = []Series{first, second}
-	c.Inventory.Eligible, c.Inventory.Observed = 2, 2
-
-	p := shortPolicy()
-	p.Evidence.MaximumGapSeconds = 300
-	p.Evidence.FreshnessSeconds = 300
-	r := run(t, in, p).Results[1]
-	if r.DataQuality.MaximumGapSeconds != 540 || r.DataQuality.GapCount != 1 || !has(r.DataQuality, ReasonInterruptedHistory) {
-		t.Fatalf("gap between pod lifetimes was not reported: %+v", r.DataQuality)
+	for _, observation := range []*ResourceObservation{&c.CPU, &c.Memory} {
+		first := observation.Series[0]
+		first.ID, first.PodUID = "old-pod", "old-pod"
+		second := first
+		second.ID, second.PodUID = "new-pod", "new-pod"
+		first.Samples, second.Samples = first.Samples[:720], second.Samples[735:]
+		observation.Series = []Series{first, second}
+	}
+	for _, r := range run(t, in, shortPolicy()).Results {
+		if len(r.Recommendations) == 0 || len(r.DataQuality.Reasons) != 0 || r.DataQuality.Coverage >= 1 || r.DataQuality.Coverage < .98 {
+			t.Fatalf("replacement outage should reduce coverage, not prevent sizing: %+v", r)
+		}
 	}
 }
 
-func TestGaugeGapBeyondPolicyIsCountedAtRegularCadence(t *testing.T) {
-	in := fixture(1200, 600)
-	p := shortPolicy()
-	p.Evidence.MaximumGapSeconds = 300
-	r := run(t, in, p).Results[1]
-	if r.DataQuality.MaximumGapSeconds != 600 || r.DataQuality.GapCount != 2 || !has(r.DataQuality, ReasonInterruptedHistory) {
-		t.Fatalf("regular gauge gaps beyond policy were not counted: %+v", r.DataQuality)
+func TestRegularSlowScrapesCanSize(t *testing.T) {
+	for _, r := range run(t, fixture(7*86400, 600), Policy{}).Results {
+		if len(r.Recommendations) == 0 || len(r.DataQuality.Reasons) != 0 || r.DataQuality.Coverage != 1 {
+			t.Fatalf("sufficient observations at a slower cadence should size: %+v", r)
+		}
 	}
 }
 
-func TestSingleSamplePodChurnBelowGapPolicyIsNotCounted(t *testing.T) {
+func TestSingleSamplePodChurnKeepsMeasurements(t *testing.T) {
 	in := fixture(120, 60)
 	c := &in.Containers[0]
 	base := c.CPU.Series[0]
@@ -325,10 +375,9 @@ func TestSingleSamplePodChurnBelowGapPolicyIsNotCounted(t *testing.T) {
 	}
 	c.Inventory.Eligible, c.Inventory.Observed = 3, 3
 	p := shortPolicy()
-	p.Evidence.MaximumGapSeconds = 300
 	r := run(t, in, p).Results[1]
-	if r.DataQuality.MaximumGapSeconds != 60 || r.DataQuality.GapCount != 0 || has(r.DataQuality, ReasonInterruptedHistory) {
-		t.Fatalf("sub-policy churn gaps were counted without a known cadence: %+v", r.DataQuality)
+	if r.DataQuality.SampleCount != 3 || r.DataQuality.SeriesCount != 3 || !has(r.DataQuality, ReasonInsufficientSamples) {
+		t.Fatalf("pod churn lost observations or invented sufficient evidence: %+v", r.DataQuality)
 	}
 }
 
@@ -499,15 +548,15 @@ func TestStaleLimitClampCannotBecomeNoActionReason(t *testing.T) {
 		t.Fatalf("stale bounded limit was omitted from quality evidence: %+v", r.DataQuality)
 	}
 }
-func TestStaleGapsDuplicatesAndFreshSignals(t *testing.T) {
-	for _, mode := range []string{"stale", "gap", "duplicates", "request", "limit"} {
+func TestStaleSparseDuplicatesAndFreshSignals(t *testing.T) {
+	for _, mode := range []string{"stale", "sparse", "duplicates", "request", "limit"} {
 		t.Run(mode, func(t *testing.T) {
 			in := fixture(1200, 60)
 			s := &in.Containers[0].CPU.Series[0]
 			switch mode {
 			case "stale":
 				s.Samples = s.Samples[:5]
-			case "gap":
+			case "sparse":
 				s.Samples = append(s.Samples[:5], s.Samples[15:]...)
 			case "duplicates":
 				s.Samples = []Sample{s.Samples[0], s.Samples[0], s.Samples[0], s.Samples[0]}
@@ -527,8 +576,8 @@ func TestStaleGapsDuplicatesAndFreshSignals(t *testing.T) {
 			if mode == "duplicates" && r.DataQuality.SampleCount != 1 {
 				t.Fatal("duplicate/carried timestamp counted as new observation")
 			}
-			if mode == "gap" && (!has(r.DataQuality, ReasonInterruptedHistory) || r.DataQuality.GapCount == 0 || r.DataQuality.Coverage >= .9) {
-				t.Fatalf("gap hidden: %+v", r.DataQuality)
+			if mode == "sparse" && (!has(r.DataQuality, ReasonSparseCoverage) || r.DataQuality.Coverage >= .9) {
+				t.Fatalf("missing coverage hidden: %+v", r.DataQuality)
 			}
 		})
 	}
@@ -733,7 +782,7 @@ func TestStableReleaseSurvivesReplicaChurn(t *testing.T) {
 				c.Inventory.Eligible = 2
 				c.Inventory.Observed = 2
 			}
-			out := run(t, in, Policy{})
+			out := run(t, in, Policy{Evidence: EvidencePolicy{MinimumHistorySeconds: 7 * 86400}})
 			for _, r := range out.Results {
 				expectedConfidence := 95
 				if replacement {
@@ -747,7 +796,7 @@ func TestStableReleaseSurvivesReplicaChurn(t *testing.T) {
 				c.CPU.Series[1].Samples[i].Value = 1000
 			}
 			c.Inventory.Available = false
-			r := run(t, in, Policy{}).Results[1]
+			r := run(t, in, Policy{Evidence: EvidencePolicy{MinimumHistorySeconds: 7 * 86400}}).Results[1]
 			if len(r.Recommendations) == 0 || r.Recommendations[0].SuggestedValue != 3000 || r.Recommendations[0].Confidence >= 95 {
 				t.Fatalf("new replica peak cannot grow stable release %+v", r)
 			}

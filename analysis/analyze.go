@@ -17,8 +17,8 @@ import (
 func DefaultPolicy() Policy {
 	return Policy{
 		CPU:      CPUPolicy{Strategy: CPUStrategyPercentile, Percentile: 95, HeadroomCoefficient: 3, LimitsToRequestsRatio: 5, Bounds: Bounds{Minimum: 20, Maximum: 64000, MinimumAbsoluteChange: 50, MinimumRelativeChange: .1}},
-		Memory:   MemoryPolicy{Strategy: MemoryStrategyMax, HeadroomCoefficient: 1.2, LimitsToRequestsRatio: 3, Bounds: Bounds{Minimum: 10 * 1024 * 1024, Maximum: 1024 * 1024 * 1024 * 1024, MinimumAbsoluteChange: 8 * 1024 * 1024, MinimumRelativeChange: .1}},
-		Evidence: EvidencePolicy{MinimumHistorySeconds: 7 * 24 * 3600, MinimumSamples: 100, MinimumCoverage: .9, MaximumGapSeconds: 300, FreshnessSeconds: 300},
+		Memory:   MemoryPolicy{Strategy: MemoryStrategyMax, HeadroomCoefficient: 1.2, OOMKilledCoefficient: 1.5, LimitsToRequestsRatio: 3, Bounds: Bounds{Minimum: 10 * 1024 * 1024, Maximum: 1024 * 1024 * 1024 * 1024, MinimumAbsoluteChange: 8 * 1024 * 1024, MinimumRelativeChange: .1}},
+		Evidence: EvidencePolicy{MinimumHistorySeconds: 3600, MinimumSamples: 30, MinimumCoverage: .9, FreshnessSeconds: 300},
 	}
 }
 func NormalizePolicy(p Policy) (Policy, error) {
@@ -36,6 +36,12 @@ func NormalizePolicy(p Policy) (Policy, error) {
 	}
 	if p.Memory.Strategy != MemoryStrategyMax {
 		return Policy{}, fmt.Errorf("unsupported memory.strategy %q", p.Memory.Strategy)
+	}
+	if p.Memory.OOMKilledCoefficient == 0 {
+		p.Memory.OOMKilledCoefficient = d.Memory.OOMKilledCoefficient
+	}
+	if !finite(p.Memory.OOMKilledCoefficient) || p.Memory.OOMKilledCoefficient < 1 {
+		return Policy{}, fmt.Errorf("memory.oomKilledCoefficient must be finite and at least one")
 	}
 	if p.CPU.Percentile == 0 {
 		p.CPU.Percentile = d.CPU.Percentile
@@ -89,14 +95,18 @@ func NormalizePolicy(p Policy) (Policy, error) {
 	if e.MinimumCoverage == 0 {
 		e.MinimumCoverage = d.Evidence.MinimumCoverage
 	}
-	if e.MaximumGapSeconds == 0 {
-		e.MaximumGapSeconds = d.Evidence.MaximumGapSeconds
-	}
 	if e.FreshnessSeconds == 0 {
 		e.FreshnessSeconds = d.Evidence.FreshnessSeconds
 	}
-	if e.MinimumHistorySeconds < 1 || e.MinimumSamples < 2 || !positive(e.MinimumCoverage) || e.MinimumCoverage > 1 || e.MaximumGapSeconds < 1 || e.FreshnessSeconds < 1 {
+	if e.MinimumHistorySeconds < 1 || e.MinimumSamples < 2 || !positive(e.MinimumCoverage) || e.MinimumCoverage > 1 || e.FreshnessSeconds < 1 {
 		return Policy{}, fmt.Errorf("invalid evidence policy")
+	}
+	if p.Memory.LeakDetection != nil {
+		leak, err := normalizeMemoryLeakPolicy(*p.Memory.LeakDetection)
+		if err != nil {
+			return Policy{}, err
+		}
+		p.Memory.LeakDetection = &leak
 	}
 	return p, nil
 }
@@ -147,6 +157,12 @@ func Analyze(in Input, p Policy) (Output, error) {
 			if err != nil {
 				return Output{}, fmt.Errorf("%s %s: %w", c.Target.Name, r, err)
 			}
+			if r == ResourceMemory && p.Memory.LeakDetection != nil {
+				result.MemoryLeak = analyzeMemoryLeak(in, c, p, result)
+				if result.MemoryLeak.Status == MemoryLeakPotential {
+					result.Notices = append(result.Notices, ReasonPotentialMemoryLeak)
+				}
+			}
 			out.Results = append(out.Results, result)
 		}
 	}
@@ -175,6 +191,11 @@ func analyzeResource(in Input, c ContainerObservation, r Resource, p Policy) (Re
 		headroom, ratio, bounds, requestsOnly = p.CPU.HeadroomCoefficient, p.CPU.LimitsToRequestsRatio, p.CPU.Bounds, p.CPU.RequestsOnly
 	}
 	result := ResourceAnalysis{Target: c.Target, Resource: r, Evidence: ResourceEvidence{CurrentRequest: canonicalSignal(obs.CurrentRequest), CurrentLimit: canonicalSignal(obs.CurrentLimit), Identity: c.Identity, Inventory: c.Inventory}, DataQuality: DataQuality{Status: DataQualityAvailable, Reasons: []Reason{}}}
+	result.DecisionTrace = &DecisionTrace{Version: "1", Settings: []SettingTrace{
+		{Setting: SettingRequests, Disposition: "retained"}, {Setting: SettingLimits, Disposition: "retained"},
+	}}
+	trace := result.DecisionTrace
+	requestTrace, limitTrace := &trace.Settings[0], &trace.Settings[1]
 	q := &result.DataQuality
 	identity := c.Identity
 	switch {
@@ -191,12 +212,39 @@ func analyzeResource(in Input, c ContainerObservation, r Resource, p Policy) (Re
 		addReason(q, ReasonUnknownReleaseStart)
 	}
 	identityBlocked := len(q.Reasons) > 0
-	usage, confidence, observed, err := normalizeUsage(in, c, obs, r, p, q)
+	usage, confidence, observed, err := normalizeUsage(in, c, obs, r, p, q, &trace.Source)
 	if err != nil {
 		return ResourceAnalysis{}, err
 	}
+	if !identityBlocked && insufficientRolloutUsage(*q) {
+		fallbackUsage, fallbackConfidence, fallbackQuality, fallback, fallbackErr := previousReleaseUsage(in, c, r, p, *q, trace)
+		if fallbackErr != nil {
+			return ResourceAnalysis{}, fallbackErr
+		}
+		if fallback != nil {
+			usage, confidence, *q = fallbackUsage, fallbackConfidence, fallbackQuality
+			result.RolloutFallback = fallback
+			result.Notices = append(result.Notices, ReasonPreviousReleaseUsage)
+		}
+	}
 	result.Evidence.AggregatedUsage = usage
 	usageBlocked := len(q.Reasons) > 0
+	oomLimitUnknown := false
+	if r == ResourceMemory {
+		kills, oomErr := selectOOMKills(in, c)
+		if oomErr != nil {
+			return ResourceAnalysis{}, oomErr
+		}
+		result.Evidence.OOMKills = kills
+		if len(kills) > 0 {
+			result.Notices = append(result.Notices, ReasonOOMKillDetected)
+		}
+		for _, kill := range kills {
+			if kill.MemoryLimitBytes == 0 {
+				oomLimitUnknown = true
+			}
+		}
+	}
 	requestOK, limitOK := true, true
 	for _, s := range []struct {
 		value        Signal
@@ -205,6 +253,9 @@ func analyzeResource(in Input, c ContainerObservation, r Resource, p Policy) (Re
 	}{{obs.CurrentRequest, ReasonMissingRequest, ReasonStaleRequest, &requestOK}, {obs.CurrentLimit, ReasonMissingLimit, ReasonStaleLimit, &limitOK}} {
 		if s.value.Available && (!finite(s.value.Value) || s.value.Value < 0) {
 			return ResourceAnalysis{}, fmt.Errorf("current signal must be finite and nonnegative")
+		}
+		if s.value.Available && s.value.Unset && s.value.Value != 0 {
+			return ResourceAnalysis{}, fmt.Errorf("unset current signal cannot have a numeric value")
 		}
 		if !s.value.Available {
 			addReason(q, s.missing)
@@ -232,18 +283,59 @@ func analyzeResource(in Input, c ContainerObservation, r Resource, p Policy) (Re
 		addReason(q, ReasonIncompleteInventory)
 		inventoryOK = false
 	}
-	if identityBlocked || usageBlocked || !requestOK {
-		q.Status = DataQualityUnavailable
-		result.NoActionReason = q.Reasons[0]
-		return result, nil
+	if oomLimitUnknown {
+		addReason(q, ReasonOOMLimitUnknown)
 	}
-	rawSuggestedRequest := usage.Value * headroom
+	// OOM evidence can size memory independently of usage history. Keep the
+	// missing-usage reasons as partial evidence, rather than inventing samples.
+	rawSuggestedRequest := 0.0
+	if !usageBlocked {
+		rawSuggestedRequest = usage.Value * headroom
+	}
 	if !finite(rawSuggestedRequest) {
 		return ResourceAnalysis{}, fmt.Errorf("suggested value overflow")
 	}
+	var adjustment *OOMAdjustment
+	if !identityBlocked && requestOK && len(result.Evidence.OOMKills) > 0 {
+		currentBase := obs.CurrentRequest.Value
+		if limitOK && obs.CurrentLimit.Value > 0 {
+			currentBase = obs.CurrentLimit.Value
+		}
+		value, oomErr := oomAdjustment(result.Evidence.OOMKills, rawSuggestedRequest, currentBase, p.Memory.OOMKilledCoefficient)
+		if oomErr != nil {
+			return ResourceAnalysis{}, oomErr
+		}
+		if value.OOMRequestFloorBytes > 0 {
+			adjustment = &value
+		}
+	}
+	if identityBlocked || !requestOK || (usageBlocked && adjustment == nil) {
+		q.Status = DataQualityUnavailable
+		result.NoActionReason = q.Reasons[0]
+		requestTrace.stop("unavailable", q.Reasons...)
+		limitTrace.stop("unavailable", q.Reasons...)
+		return result, nil
+	}
+	if !usageBlocked {
+		requestTrace.step("usage × headroom", map[string]float64{"usage": usage.Value, "coefficient": headroom, "candidate": rawSuggestedRequest})
+	} else {
+		confidence = 0 // There is no qualifying usage history to score.
+		latest := result.Evidence.OOMKills[len(result.Evidence.OOMKills)-1]
+		trace.Source = UsageSource{Release: c.Target.Release, PodUID: latest.PodUID, Timestamp: latest.Timestamp, Method: "OOM kill"}
+		requestTrace.step("OOM sizing without usage history", nil)
+	}
+	if adjustment != nil {
+		result.OOMAdjustment = adjustment
+		rawSuggestedRequest = math.Max(rawSuggestedRequest, adjustment.OOMRequestFloorBytes)
+		requestTrace.step("OOM floor", map[string]float64{"baseline": adjustment.BaselineRequestBytes, "floor": adjustment.OOMRequestFloorBytes, "candidate": rawSuggestedRequest, "coefficient": p.Memory.OOMKilledCoefficient})
+	}
 	suggestedRequest := math.Max(bounds.Minimum, math.Min(bounds.Maximum, rawSuggestedRequest))
+	if usageBlocked {
+		suggestedRequest = math.Max(suggestedRequest, obs.CurrentRequest.Value)
+	}
+	requestTrace.step("request bounds", map[string]float64{"before": rawSuggestedRequest, "minimum": bounds.Minimum, "maximum": bounds.Maximum, "candidate": suggestedRequest})
 	requestBounded := suggestedRequest != rawSuggestedRequest
-	boundsSuppressedAction := requestBounded && isMaterial(obs.CurrentRequest.Value, rawSuggestedRequest, bounds) && !isMaterial(obs.CurrentRequest.Value, suggestedRequest, bounds)
+	boundsSuppressedAction := requestBounded && isMaterial(obs.CurrentRequest, rawSuggestedRequest, bounds) && !isMaterial(obs.CurrentRequest, suggestedRequest, bounds)
 	if requestBounded {
 		addReason(q, ReasonBounds)
 	}
@@ -254,20 +346,41 @@ func analyzeResource(in Input, c ContainerObservation, r Resource, p Policy) (Re
 			return ResourceAnalysis{}, fmt.Errorf("suggested value overflow")
 		}
 		suggestedLimit = math.Max(suggestedRequest, math.Min(bounds.Maximum, rawSuggestedLimit))
+		if usageBlocked && limitOK {
+			suggestedLimit = math.Max(suggestedLimit, obs.CurrentLimit.Value)
+		}
+		limitTrace.step("request × limit ratio", map[string]float64{"request": suggestedRequest, "ratio": ratio, "candidate": rawSuggestedLimit})
+		limitTrace.step("limit bounds", map[string]float64{"before": rawSuggestedLimit, "minimum": suggestedRequest, "maximum": bounds.Maximum, "candidate": suggestedLimit})
 		limitBounded := suggestedLimit != rawSuggestedLimit
-		boundsSuppressedAction = boundsSuppressedAction || limitOK && limitBounded && isMaterial(obs.CurrentLimit.Value, rawSuggestedLimit, bounds) && !isMaterial(obs.CurrentLimit.Value, suggestedLimit, bounds)
+		boundsSuppressedAction = boundsSuppressedAction || limitOK && limitBounded && isMaterial(obs.CurrentLimit, rawSuggestedLimit, bounds) && !isMaterial(obs.CurrentLimit, suggestedLimit, bounds)
 		if limitBounded {
 			addReason(q, ReasonBounds)
 		}
 	}
-	inventorySuppressedDownsize := false
+	downsizeSuppressed := false
 	for _, s := range []struct {
-		setting   Setting
-		current   Signal
-		suggested float64
-		ok        bool
-	}{{SettingRequests, obs.CurrentRequest, suggestedRequest, requestOK}, {SettingLimits, obs.CurrentLimit, suggestedLimit, limitOK && !requestsOnly}} {
+		setting      Setting
+		current      Signal
+		suggested    float64
+		ok           bool
+		missing, old Reason
+	}{
+		{SettingRequests, obs.CurrentRequest, suggestedRequest, requestOK, ReasonMissingRequest, ReasonStaleRequest},
+		{SettingLimits, obs.CurrentLimit, suggestedLimit, limitOK && !requestsOnly, ReasonMissingLimit, ReasonStaleLimit},
+	} {
+		settingTrace := requestTrace
+		if s.setting == SettingLimits {
+			settingTrace = limitTrace
+		}
 		if !s.ok {
+			if requestsOnly && s.setting == SettingLimits {
+				settingTrace.stop("disabled", ReasonLimitDisabled)
+			} else {
+				settingTrace.stop("unavailable", s.missing)
+				if s.current.Available {
+					settingTrace.stop("unavailable", s.old)
+				}
+			}
 			continue
 		}
 		if s.setting == SettingLimits {
@@ -277,24 +390,51 @@ func analyzeResource(in Input, c ContainerObservation, r Resource, p Policy) (Re
 					retainedRequest = rec.SuggestedValue
 				}
 			}
+			settingTrace.guard("limit covers retained request", s.suggested >= retainedRequest, map[string]float64{"candidate": s.suggested, "retainedRequest": retainedRequest})
 			if s.suggested < retainedRequest {
+				settingTrace.stop("retained", ReasonBounds)
 				addReason(q, ReasonBounds)
-				boundsSuppressedAction = boundsSuppressedAction || isMaterial(s.current.Value, s.suggested, bounds)
+				boundsSuppressedAction = boundsSuppressedAction || isMaterial(s.current, s.suggested, bounds)
 				continue
 			}
 		}
-		if (s.suggested < s.current.Value || (s.setting == SettingLimits && s.current.Value == 0)) && !inventoryOK {
-			inventorySuppressedDownsize = inventorySuppressedDownsize || isMaterial(s.current.Value, s.suggested, bounds)
+		if s.suggested < s.current.Value || (s.setting == SettingLimits && s.current.Value == 0) {
+			settingTrace.guard("safe reduction or introduction of limit", inventoryOK && !oomLimitUnknown, nil)
+		}
+		if (s.suggested < s.current.Value || (s.setting == SettingLimits && s.current.Value == 0)) && (!inventoryOK || oomLimitUnknown) {
+			for _, reason := range q.Reasons {
+				if reason == ReasonUnknownInventory || reason == ReasonStaleInventory || reason == ReasonIncompleteInventory || reason == ReasonExcludedContainers || reason == ReasonOOMLimitUnknown {
+					settingTrace.Reasons = append(settingTrace.Reasons, reason)
+				}
+			}
+			downsizeSuppressed = downsizeSuppressed || isMaterial(s.current, s.suggested, bounds)
 			continue
 		}
 		// Do not propose a request above a known retained limit.
-		if s.setting == SettingRequests && limitOK && obs.CurrentLimit.Value > 0 && s.suggested > obs.CurrentLimit.Value && (requestsOnly || !isMaterial(obs.CurrentLimit.Value, suggestedLimit, bounds)) {
+		if s.setting == SettingRequests && limitOK && obs.CurrentLimit.Value > 0 {
+			settingTrace.guard("request fits retained or changing limit", s.suggested <= obs.CurrentLimit.Value || (!requestsOnly && isMaterial(obs.CurrentLimit, suggestedLimit, bounds)), map[string]float64{"candidate": s.suggested, "currentLimit": obs.CurrentLimit.Value})
+		}
+		if s.setting == SettingRequests && limitOK && obs.CurrentLimit.Value > 0 && s.suggested > obs.CurrentLimit.Value && (requestsOnly || !isMaterial(obs.CurrentLimit, suggestedLimit, bounds)) {
+			settingTrace.stop("retained", ReasonBounds)
 			addReason(q, ReasonBounds)
-			boundsSuppressedAction = boundsSuppressedAction || isMaterial(s.current.Value, s.suggested, bounds)
+			boundsSuppressedAction = boundsSuppressedAction || isMaterial(s.current, s.suggested, bounds)
 			continue
 		}
-		if isMaterial(s.current.Value, s.suggested, bounds) {
-			result.Recommendations = append(result.Recommendations, Recommendation{Setting: s.setting, CurrentValue: s.current.Value, SuggestedValue: s.suggested, Confidence: confidence})
+		material := isMaterial(s.current, s.suggested, bounds)
+		if s.current.Unset {
+			settingTrace.step("initialize unset setting", map[string]float64{"candidate": s.suggested})
+		} else {
+			values := map[string]float64{"current": s.current.Value, "candidate": s.suggested, "absoluteChange": math.Abs(s.suggested - s.current.Value), "minimumAbsoluteChange": bounds.MinimumAbsoluteChange, "minimumRelativeChange": bounds.MinimumRelativeChange}
+			if s.current.Value > 0 {
+				values["relativeChange"] = math.Abs(s.suggested-s.current.Value) / s.current.Value
+			}
+			settingTrace.guard("material change", material, values)
+		}
+		if material {
+			settingTrace.stop("recommended")
+			result.Recommendations = append(result.Recommendations, Recommendation{Setting: s.setting, CurrentValue: s.current.Value, CurrentUnset: s.current.Unset, SuggestedValue: s.suggested, Confidence: confidence})
+		} else {
+			settingTrace.stop("retained", ReasonNoMaterialChange)
 		}
 	}
 	if requestsOnly {
@@ -304,9 +444,9 @@ func analyzeResource(in Input, c ContainerObservation, r Resource, p Policy) (Re
 		q.Status = DataQualityPartial
 	}
 	if len(result.Recommendations) == 0 {
-		if inventorySuppressedDownsize {
+		if downsizeSuppressed {
 			for _, reason := range q.Reasons {
-				if reason == ReasonUnknownInventory || reason == ReasonStaleInventory || reason == ReasonIncompleteInventory || reason == ReasonExcludedContainers {
+				if reason == ReasonUnknownInventory || reason == ReasonStaleInventory || reason == ReasonIncompleteInventory || reason == ReasonExcludedContainers || reason == ReasonOOMLimitUnknown {
 					result.NoActionReason = reason
 					break
 				}
@@ -328,15 +468,23 @@ func canonicalSignal(s Signal) Signal {
 	}
 	return s
 }
-func isMaterial(current, suggested float64, b Bounds) bool {
-	delta := math.Abs(current - suggested)
-	return delta > 0 && delta >= b.MinimumAbsoluteChange && (current == 0 || delta/current >= b.MinimumRelativeChange)
+func isMaterial(current Signal, suggested float64, b Bounds) bool {
+	if current.Unset {
+		return suggested > 0
+	}
+	delta := math.Abs(current.Value - suggested)
+	return delta > 0 && delta >= b.MinimumAbsoluteChange && (current.Value == 0 || delta/current.Value >= b.MinimumRelativeChange)
 }
 
 // A replica's percentile is computed separately; the largest replica result is
 // used for the shared container setting. History spans the current release across
 // pod lifetimes; new healthy replicas do not erase established release history.
-func normalizeUsage(in Input, c ContainerObservation, obs ResourceObservation, r Resource, p Policy, q *DataQuality) (Signal, int, int, error) {
+func normalizeUsage(in Input, c ContainerObservation, obs ResourceObservation, r Resource, p Policy, q *DataQuality, source *UsageSource) (Signal, int, int, error) {
+	*source = UsageSource{Release: c.Target.Release, Method: "maximum"}
+	if r == ResourceCPU && p.CPU.Strategy == CPUStrategyPercentile {
+		source.Method = "maximum of per-series nearest-rank percentiles"
+		source.Percentile = p.CPU.Percentile
+	}
 	series := append([]Series(nil), obs.Series...)
 	sort.Slice(series, func(i, j int) bool { return series[i].ID < series[j].ID })
 	ids := map[string]bool{}
@@ -346,7 +494,6 @@ func normalizeUsage(in Input, c ContainerObservation, obs ResourceObservation, r
 	aggregateTimestamp := int64(0)
 	aggregateConfidence := 0.0
 	releaseTimes := []int64{}
-	releaseSpans := [][2]int64{}
 	cadences := []float64{}
 	start := in.WindowStart
 	if c.Identity.ReleaseStartedAt > start {
@@ -370,77 +517,17 @@ func normalizeUsage(in Input, c ContainerObservation, obs ResourceObservation, r
 		if r == ResourceMemory && s.Kind != SampleGauge {
 			return Signal{}, 0, 0, fmt.Errorf("memory samples must be byte gauges")
 		}
-		raw := append([]Sample(nil), s.Samples...)
-		sort.Slice(raw, func(i, j int) bool { return raw[i].Timestamp < raw[j].Timestamp })
-		clean := make([]Sample, 0, len(raw))
-		for _, v := range raw {
-			if v.Timestamp < start || v.Timestamp > in.EvaluationTime {
-				continue
-			}
-			if !finite(v.Value) || v.Value < 0 {
-				return Signal{}, 0, 0, fmt.Errorf("sample values must be finite and nonnegative")
-			}
-			if len(clean) > 0 && v.Timestamp == clean[len(clean)-1].Timestamp {
-				if v.Value != clean[len(clean)-1].Value {
-					return Signal{}, 0, 0, fmt.Errorf("conflicting samples at one source timestamp")
-				}
-				continue
-			}
-			clean = append(clean, v)
+		values, err := NormalizeSamples(s, start, in.EvaluationTime)
+		if err != nil {
+			return Signal{}, 0, 0, err
 		}
-		if len(clean) == 0 {
-			continue
-		}
-		// Preserve actual source gaps before counter intervals are discarded.
-		// Derived rate timestamps can omit a terminal gap or combine an internal
-		// gap with the following valid interval.
-		sourceGaps := make([]float64, 0, len(clean)-1)
-		for i := 1; i < len(clean); i++ {
-			sourceGaps = append(sourceGaps, float64(clean[i].Timestamp-clean[i-1].Timestamp)/1000)
-		}
-		if len(sourceGaps) > 0 {
-			sort.Float64s(sourceGaps)
-			sourceCadence := sourceGaps[(len(sourceGaps)-1)/2]
-			for _, gap := range sourceGaps {
-				q.MaximumGapSeconds = math.Max(q.MaximumGapSeconds, gap)
-				oversizedGap := gap > float64(p.Evidence.MaximumGapSeconds)
-				if gap > 1.5*sourceCadence || oversizedGap {
-					q.GapCount++
-				}
-				if s.Kind == SampleCPUCounterSeconds && oversizedGap {
-					addReason(q, ReasonInterruptedHistory)
-				}
-			}
-		}
-		values := make([]Sample, 0, len(clean))
-		timestamps := make([]int64, 0, len(clean))
-		if s.Kind == SampleCPUCounterSeconds {
-			for i := 1; i < len(clean); i++ {
-				dt := float64(clean[i].Timestamp-clean[i-1].Timestamp) / 1000
-				if dt > float64(p.Evidence.MaximumGapSeconds) {
-					continue
-				}
-				delta := clean[i].Value - clean[i-1].Value
-				if delta < 0 {
-					delta = clean[i].Value
-				}
-				rate := delta / dt * 1000
-				if !finite(rate) {
-					return Signal{}, 0, 0, fmt.Errorf("CPU rate overflow")
-				}
-				values = append(values, Sample{Value: rate, Timestamp: clean[i].Timestamp})
-				timestamps = append(timestamps, clean[i].Timestamp)
-			}
-		} else {
-			for _, v := range clean {
-				values = append(values, v)
-				timestamps = append(timestamps, v.Timestamp)
-			}
+		timestamps := make([]int64, len(values))
+		for i, sample := range values {
+			timestamps[i] = sample.Timestamp
 		}
 		if len(values) == 0 {
 			continue
 		}
-		releaseSpans = append(releaseSpans, [2]int64{clean[0].Timestamp, clean[len(clean)-1].Timestamp})
 		selected++
 		pod := s.PodUID
 		if pod == "" {
@@ -492,11 +579,11 @@ func normalizeUsage(in Input, c ContainerObservation, obs ResourceObservation, r
 		// The release may have enough history while a new replica alone supplies
 		// its sizing value. Keep eligibility release-wide but do not borrow
 		// confidence from another replica with a lower aggregate.
-		seriesCovered := math.Min(cadence, float64(p.Evidence.MaximumGapSeconds))
+		seriesCovered := cadence
 		for _, gap := range gaps {
 			seriesCovered += math.Min(gap, cadence)
 		}
-		seriesSpan := float64(last-first)/1000 + math.Min(cadence, float64(p.Evidence.MaximumGapSeconds))
+		seriesSpan := float64(last-first)/1000 + cadence
 		seriesCoverage := 0.0
 		if seriesSpan > 0 {
 			seriesCoverage = math.Min(1, seriesCovered/seriesSpan)
@@ -508,6 +595,7 @@ func normalizeUsage(in Input, c ContainerObservation, obs ResourceObservation, r
 			aggregate = value.Value
 			aggregateTimestamp = value.Timestamp
 			aggregateConfidence = seriesConfidence
+			source.SeriesID, source.PodUID, source.Timestamp = s.ID, s.PodUID, value.Timestamp
 		}
 	}
 	q.SeriesCount = selected
@@ -528,54 +616,30 @@ func normalizeUsage(in Input, c ContainerObservation, obs ResourceObservation, r
 		cadence = cadences[len(cadences)/2]
 		q.CadenceSeconds = cadence
 	}
-	covered := math.Min(cadence, float64(p.Evidence.MaximumGapSeconds))
-	releaseMaxGap := 0.0
+	covered := cadence
 	for i := 1; i < len(unique); i++ {
 		gap := float64(unique[i]-unique[i-1]) / 1000
 		covered += math.Min(gap, cadence)
-		releaseMaxGap = math.Max(releaseMaxGap, gap)
-	}
-	// Derived CPU rate endpoints can exaggerate a gap after an interval is
-	// discarded. Use raw source spans to report gaps between pod lifetimes.
-	sort.Slice(releaseSpans, func(i, j int) bool { return releaseSpans[i][0] < releaseSpans[j][0] })
-	if len(releaseSpans) > 0 {
-		last := releaseSpans[0][1]
-		for _, span := range releaseSpans[1:] {
-			if span[0] > last {
-				gap := float64(span[0]-last) / 1000
-				q.MaximumGapSeconds = math.Max(q.MaximumGapSeconds, gap)
-				if cadence > 0 && gap > 1.5*cadence || gap > float64(p.Evidence.MaximumGapSeconds) {
-					q.GapCount++
-				}
-			}
-			last = max(last, span[1])
-		}
 	}
 	if in.EvaluationTime > start {
 		q.Coverage = math.Min(1, covered/(float64(in.EvaluationTime-start)/1000))
 	}
 	q.ObservedIntervalHours = float64(q.ObservedEnd-q.ObservedStart) / 3600000
-	minSpan := float64(q.ObservedEnd-q.ObservedStart)/1000 + math.Min(cadence, float64(p.Evidence.MaximumGapSeconds))
-	minCount := len(unique)
+	minSpan := float64(q.ObservedEnd-q.ObservedStart)/1000 + cadence
+	q.ObservationCount = len(unique)
 	if stale(q.ObservedEnd, in, p.Evidence) {
 		addReason(q, ReasonStaleUsage)
-	}
-	if releaseMaxGap > float64(p.Evidence.MaximumGapSeconds) {
-		addReason(q, ReasonInterruptedHistory)
 	}
 	if minSpan < float64(p.Evidence.MinimumHistorySeconds) {
 		addReason(q, ReasonInsufficientHistory)
 	}
-	if minCount < p.Evidence.MinimumSamples {
+	if q.ObservationCount < p.Evidence.MinimumSamples {
 		addReason(q, ReasonInsufficientSamples)
 	}
 	if q.Coverage < p.Evidence.MinimumCoverage {
 		addReason(q, ReasonSparseCoverage)
 	}
-	if q.MaximumGapSeconds > float64(p.Evidence.MaximumGapSeconds) {
-		addReason(q, ReasonInterruptedHistory)
-	}
-	confidence := int(math.Floor(95 * math.Min(1, minSpan/float64(p.Evidence.MinimumHistorySeconds)) * q.Coverage * math.Min(1, float64(minCount)/float64(p.Evidence.MinimumSamples))))
+	confidence := int(math.Floor(95 * math.Min(1, minSpan/float64(p.Evidence.MinimumHistorySeconds)) * q.Coverage * math.Min(1, float64(q.ObservationCount)/float64(p.Evidence.MinimumSamples))))
 	confidence = min(confidence, int(math.Floor(aggregateConfidence)))
 	return Signal{Available: true, Value: aggregate, Timestamp: aggregateTimestamp}, confidence, len(pods), nil
 }
@@ -607,6 +671,13 @@ func selectReleaseSegment(in Input, c ContainerObservation) ContainerObservation
 					boundary = v.Timestamp
 				}
 			}
+		}
+	}
+	// A verified current-rollout OOM also proves the rollout was active at
+	// that instant, including containers that died before their first scrape.
+	for _, kill := range c.OOMKills {
+		if kill.WorkloadUID == c.Target.WorkloadUID && kill.Release == c.Target.Release && kill.Timestamp > cutoff && kill.Timestamp <= in.EvaluationTime && (boundary == 0 || kill.Timestamp < boundary) {
+			boundary = kill.Timestamp
 		}
 	}
 	if boundary == 0 && cutoff >= in.WindowStart {
