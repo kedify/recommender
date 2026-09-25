@@ -138,7 +138,8 @@ assigning it to this container. Use zero or omit `MemoryLimitBytes` when the
 event-time limit is unknown or unlimited; do not substitute today's limit.
 Repeated scrapes of one termination retain the same event ID and timestamp.
 Identical events are deduplicated; conflicting observations sharing an ID are
-rejected. Events are sorted deterministically and input is not mutated.
+rejected. All supplied observations are validated before filtering by time or
+workload/release identity. Events are sorted deterministically and input is not mutated.
 
 Only events within the requested window and selected workload UID/release segment
 affect memory. Events from before a rollback boundary or from another workload UID
@@ -269,7 +270,7 @@ absolute/relative growth, and trend consistency through `MemoryLeakPolicy`.
 Durations use seconds; zero fields select defaults. Policies must retain at least
 12 buckets of minimum history and at most 256 buckets in the lookback, bounding the
 pairwise computation independently of the number of raw samples. P10 and the recent
-trend check are fixed parts of detector version `2`.
+trend check are fixed parts of detector version `3`.
 
 Each memory result gains `memoryLeak`, including:
 
@@ -278,6 +279,8 @@ Each memory result gains `memoryLeak`, including:
   `insufficient-data` when none passes and evidence is incomplete or unavailable.
 - The detector version, selected window, evaluated/suspected/skipped episode counts,
   and explicit reasons. A positive finding may coexist with skipped episodes.
+  Selected series with no samples in the lookback count as skipped episodes, with
+  missing or stale usage reasons; they cannot support a `no-leak-pattern` result.
 - Per-episode series/pod identity, observed interval, sample/bucket counts, coverage,
   starting/ending baselines, growth in bytes and as a fraction, overall/recent slopes
   in bytes/hour, and trend consistency. Consistency is a measured fraction of

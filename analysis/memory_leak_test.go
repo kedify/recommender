@@ -352,6 +352,53 @@ func TestMemoryLeakInsufficientEvidence(t *testing.T) {
 	}
 }
 
+func TestMemoryLeakAccountsForUnusableSeries(t *testing.T) {
+	for _, growing := range []bool{false, true} {
+		for _, tt := range []struct {
+			name   string
+			mutate func(*Series)
+			reason Reason
+		}{
+			{"empty", func(s *Series) { s.Samples = nil }, ReasonMissingUsage},
+			{"outside lookback", func(s *Series) { s.Samples = s.Samples[:24*60] }, ReasonStaleUsage},
+			{"stale within lookback", func(s *Series) { s.Samples = s.Samples[:len(s.Samples)-10] }, ReasonStaleUsage},
+		} {
+			name := tt.name + "/flat companion"
+			if growing {
+				name = tt.name + "/growing companion"
+			}
+			t.Run(name, func(t *testing.T) {
+				in := leakFixture(48, func(h float64) float64 {
+					if growing {
+						return 100 + 12*h
+					}
+					return 100
+				})
+				c := &in.Containers[0]
+				other := c.Memory.Series[0]
+				other.ID, other.PodUID = "unusable", "unusable-pod"
+				tt.mutate(&other)
+				c.Memory.Series = append(c.Memory.Series, other)
+				leak := run(t, in, leakPolicy()).Results[0].MemoryLeak
+				want := MemoryLeakInsufficientData
+				if growing {
+					want = MemoryLeakPotential
+				}
+				if leak.Status != want || leak.EvaluatedEpisodes != 1 || leak.SkippedEpisodes != 1 || len(leak.Episodes) != 2 {
+					t.Fatalf("unusable series was lost: %+v", leak)
+				}
+				skipped := leak.Episodes[1]
+				if skipped.SeriesID != other.ID || skipped.PodUID != other.PodUID || skipped.Status != MemoryLeakInsufficientData || !has(DataQuality{Reasons: skipped.Reasons}, tt.reason) {
+					t.Fatalf("missing skipped-series evidence: %+v", skipped)
+				}
+				if !growing && !has(DataQuality{Reasons: leak.Reasons}, tt.reason) {
+					t.Fatalf("missing aggregate reason: %+v", leak)
+				}
+			})
+		}
+	}
+}
+
 func TestMemoryLeakToleratesCollectionOutages(t *testing.T) {
 	for _, minutes := range []int{15, 60} {
 		in := leakFixture(24, func(h float64) float64 { return 100 + 12*h })

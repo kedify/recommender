@@ -359,11 +359,15 @@ func analyzeResource(in Input, c ContainerObservation, r Resource, p Policy) (Re
 	}
 	downsizeSuppressed := false
 	for _, s := range []struct {
-		setting   Setting
-		current   Signal
-		suggested float64
-		ok        bool
-	}{{SettingRequests, obs.CurrentRequest, suggestedRequest, requestOK}, {SettingLimits, obs.CurrentLimit, suggestedLimit, limitOK && !requestsOnly}} {
+		setting      Setting
+		current      Signal
+		suggested    float64
+		ok           bool
+		missing, old Reason
+	}{
+		{SettingRequests, obs.CurrentRequest, suggestedRequest, requestOK, ReasonMissingRequest, ReasonStaleRequest},
+		{SettingLimits, obs.CurrentLimit, suggestedLimit, limitOK && !requestsOnly, ReasonMissingLimit, ReasonStaleLimit},
+	} {
 		settingTrace := requestTrace
 		if s.setting == SettingLimits {
 			settingTrace = limitTrace
@@ -372,9 +376,9 @@ func analyzeResource(in Input, c ContainerObservation, r Resource, p Policy) (Re
 			if requestsOnly && s.setting == SettingLimits {
 				settingTrace.stop("disabled", ReasonLimitDisabled)
 			} else {
-				settingTrace.stop("unavailable", ReasonMissingLimit)
-				if obs.CurrentLimit.Available {
-					settingTrace.stop("unavailable", ReasonStaleLimit)
+				settingTrace.stop("unavailable", s.missing)
+				if s.current.Available {
+					settingTrace.stop("unavailable", s.old)
 				}
 			}
 			continue

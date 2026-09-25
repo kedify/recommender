@@ -1,8 +1,45 @@
+// Copyright Kedify Inc.
+// SPDX-License-Identifier: LicenseRef-Kedify-Commercial-1.0 AND LicenseRef-Kedify-Public-Source-1.0
+// See LICENSE and PUBLIC_SOURCE_LICENSE.
+
 package analysis
 
 import (
+	"reflect"
 	"testing"
 )
+
+func TestDecisionTraceCurrentSettingReasons(t *testing.T) {
+	for _, tt := range []struct {
+		name      string
+		setting   Setting
+		available bool
+		reason    Reason
+	}{
+		{"missing request", SettingRequests, false, ReasonMissingRequest},
+		{"stale request", SettingRequests, true, ReasonStaleRequest},
+		{"missing limit", SettingLimits, false, ReasonMissingLimit},
+		{"stale limit", SettingLimits, true, ReasonStaleLimit},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			in := fixture(600, 60)
+			for _, obs := range []*ResourceObservation{&in.Containers[0].CPU, &in.Containers[0].Memory} {
+				signal := &obs.CurrentRequest
+				if tt.setting == SettingLimits {
+					signal = &obs.CurrentLimit
+				}
+				signal.Available, signal.Timestamp = tt.available, epoch
+			}
+			for _, result := range run(t, in, shortPolicy()).Results {
+				for _, trace := range result.DecisionTrace.Settings {
+					if trace.Setting == tt.setting && (trace.Disposition != "unavailable" || !reflect.DeepEqual(trace.Reasons, []Reason{tt.reason})) {
+						t.Fatalf("%s %s trace: %+v", result.Resource, tt.setting, trace)
+					}
+				}
+			}
+		})
+	}
+}
 
 func TestDecisionTraceDispositions(t *testing.T) {
 	for _, tt := range []struct {

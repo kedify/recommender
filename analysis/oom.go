@@ -20,14 +20,8 @@ func selectOOMKills(in Input, c ContainerObservation) ([]OOMKill, error) {
 		if kill.Timestamp <= 0 {
 			return nil, fmt.Errorf("OOM kill timestamp must be positive Unix milliseconds")
 		}
-		if kill.Timestamp < start || kill.Timestamp > in.EvaluationTime {
-			continue
-		}
 		if kill.WorkloadUID == "" || kill.Release == "" {
 			return nil, fmt.Errorf("OOM kill workload UID and release are required")
-		}
-		if kill.WorkloadUID != c.Target.WorkloadUID || kill.Release != c.Target.Release {
-			continue
 		}
 		if kill.ID == "" {
 			return nil, fmt.Errorf("OOM kill ID is required")
@@ -42,6 +36,11 @@ func selectOOMKills(in Input, c ContainerObservation) ([]OOMKill, error) {
 			continue
 		}
 		seen[kill.ID] = kill
+		// Validate every supplied observation, including conflicts across the
+		// selection boundary, before deciding whether it affects this analysis.
+		if kill.Timestamp < start || kill.Timestamp > in.EvaluationTime || kill.WorkloadUID != c.Target.WorkloadUID || kill.Release != c.Target.Release {
+			continue
+		}
 		kills = append(kills, kill)
 	}
 	sort.Slice(kills, func(i, j int) bool {

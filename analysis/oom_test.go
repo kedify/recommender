@@ -302,6 +302,62 @@ func TestOOMDeterminismDeduplicationAndValidation(t *testing.T) {
 	}
 }
 
+func TestOOMValidatesObservationsBeforeFiltering(t *testing.T) {
+	for _, scope := range []struct {
+		name   string
+		mutate func(*OOMKill)
+	}{
+		{"before window", func(k *OOMKill) { k.Timestamp = epoch - 1 }},
+		{"before release", func(k *OOMKill) { k.Timestamp = epoch + 1 }},
+		{"future", func(k *OOMKill) { k.Timestamp = epoch + 600001 }},
+		{"other workload", func(k *OOMKill) { k.WorkloadUID = "other" }},
+		{"other release", func(k *OOMKill) { k.Release = "B" }},
+	} {
+		for _, invalid := range []struct {
+			name   string
+			mutate func(*OOMKill)
+		}{
+			{"missing ID", func(k *OOMKill) { k.ID = "" }},
+			{"missing UID", func(k *OOMKill) { k.WorkloadUID = "" }},
+			{"missing release", func(k *OOMKill) { k.Release = "" }},
+			{"negative limit", func(k *OOMKill) { k.MemoryLimitBytes = -1 }},
+			{"NaN limit", func(k *OOMKill) { k.MemoryLimitBytes = math.NaN() }},
+			{"infinite limit", func(k *OOMKill) { k.MemoryLimitBytes = math.Inf(1) }},
+		} {
+			t.Run(scope.name+"/"+invalid.name, func(t *testing.T) {
+				in := fixture(600, 60)
+				in.Containers[0].Identity.ReleaseStartedAt = epoch + 60000
+				kill := oomKill("oom", epoch+120000, 512*mib)
+				scope.mutate(&kill)
+				invalid.mutate(&kill)
+				in.Containers[0].OOMKills = []OOMKill{kill}
+				if _, err := Analyze(in, shortPolicy()); err == nil || !strings.Contains(err.Error(), "OOM") {
+					t.Fatalf("invalid filtered OOM was accepted: %v", err)
+				}
+			})
+		}
+		t.Run(scope.name+"/conflicting ID", func(t *testing.T) {
+			in := fixture(600, 60)
+			in.Containers[0].Identity.ReleaseStartedAt = epoch + 60000
+			selected := oomKill("oom", epoch+120000, 512*mib)
+			filtered := selected
+			scope.mutate(&filtered)
+			conflicting := filtered
+			conflicting.MemoryLimitBytes++
+			for _, kills := range [][]OOMKill{{selected, filtered}, {filtered, selected}, {filtered, conflicting}} {
+				in.Containers[0].OOMKills = kills
+				if _, err := Analyze(in, shortPolicy()); err == nil || !strings.Contains(err.Error(), "conflicting observations for OOM kill") {
+					t.Fatalf("conflicting filtered OOMs were accepted: %v", err)
+				}
+			}
+			in.Containers[0].OOMKills = []OOMKill{filtered, filtered}
+			if r := run(t, in, shortPolicy()).Results[0]; len(r.Evidence.OOMKills) != 0 {
+				t.Fatalf("valid filtered duplicates affected sizing: %+v", r)
+			}
+		})
+	}
+}
+
 func TestOOMPolicyNormalizationAndIdentity(t *testing.T) {
 	for _, coefficient := range []float64{0, 1, 1.25, 2} {
 		p, err := NormalizePolicy(Policy{Memory: MemoryPolicy{OOMKilledCoefficient: coefficient}})

@@ -92,6 +92,17 @@ func analyzeMemoryLeak(in Input, c ContainerObservation, p Policy, resource Reso
 			}
 		}
 		if len(samples) == 0 {
+			// Keep missing series in the coverage accounting: another replica's
+			// stable baseline cannot establish that this lifetime has no leak.
+			reason := ReasonMissingUsage
+			if firstObserved > 0 {
+				reason = ReasonStaleUsage
+			}
+			out.Episodes = append(out.Episodes, MemoryLeakEvidence{
+				SeriesID: s.ID, PodUID: s.PodUID, Status: MemoryLeakInsufficientData,
+				Reasons: []Reason{reason},
+			})
+			out.SkippedEpisodes++
 			continue
 		}
 		sort.Slice(samples, func(i, j int) bool { return samples[i].Timestamp < samples[j].Timestamp })
