@@ -351,3 +351,61 @@ Traces do not change sizing behavior or contain raw samples.
 used by sizing, including CPU counter resets, duplicate handling, and timestamp
 filtering. Chart consumers should use it before display-only downsampling; never
 recompute recommendations from reduced chart data.
+
+## Optional workload classification
+
+```go
+policy := analysis.DefaultPolicy()
+policy.Classification = &analysis.ClassificationPolicy{}
+output, err := analysis.Analyze(snapshot, policy)
+```
+
+`output.Classifications` contains one finding per container target with an ordered
+`features` list and evidence for all eight detectors. Classification is disabled
+by default and never changes resource recommendations or sizing notices. The
+optional fields are additive to the existing input/output schemas; detector
+version `1` identifies the classification heuristics independently of sizing.
+
+Tags are `leader-election`, `high-variance-cpu`, `high-variance-memory`,
+`oom-killed`, `memory-leak`, `cpu-throttled`, `has-http-traffic`, and `has-metrics`.
+A finding has `detected`, `not-detected`, `insufficient-data`, or `unavailable`
+status. An absent tag is not proof that the workload lacks that feature.
+
+Adapters may supply `ContainerObservation.Classification` with attributed Lease
+and endpoint observations, classification-only OOM kills, and raw CPU throttling
+counters. The analyzer performs no I/O. Lease/workload associations must come
+from verified ownership or unambiguous holder identity; merely sharing a
+namespace is insufficient. Endpoint observations must resolve the container.
+HTTP metadata is heuristic; `MetricsVerified` requires a successful endpoint
+response containing valid Prometheus/OpenMetrics samples. Adapters must not save
+response bodies, credentials, or secret-bearing URLs in these observations.
+`LeasesAvailable` distinguishes an observed empty Lease list from unavailable discovery.
+Lease `ObservedAt` records when the source snapshot was taken so a short Lease
+can be recognized even when metric collection outlasts its duration; zero uses
+the analysis evaluation time. Discovery issues remain attached to the result.
+
+Variance evaluates each current-release container lifetime separately over the
+latest supplied 24 hours, excludes five minutes of warmup, and requires at least
+30 minutes, 30 samples, and 70% coverage. A coefficient of variation of at least
+0.5 and P95−P5 spread of at least 50 millicores or 32 MiB earns the resource tag.
+Replicas and previous releases are never pooled. Memory-leak classification uses
+the existing leak detector and its defaults; classification-only OOM kills split
+leak episodes but do not participate in sizing.
+
+`CPUThrottlingObservation` supplies `Seconds`, `ThrottledPeriods`, and `Periods`
+as optional `Series` lists with `Kind: SampleGauge`. Values are cumulative raw
+counters for `container_cpu_cfs_throttled_seconds_total`,
+`container_cpu_cfs_throttled_periods_total`, and `container_cpu_cfs_periods_total`,
+not rates or millicores. Each list preserves workload UID, release, pod UID, and
+container lifetime ID. `CounterIntervals` canonicalizes timestamps and excludes
+resets and gaps exceeding three median cadences. A positive observed increment
+assigns `cpu-throttled`. Evidence reports throttled seconds per observed second
+and throttled-period percentage only over matching denominator intervals.
+Seconds per second may exceed one; this does not estimate application latency.
+
+Development and CI use the Go 1.27.3 toolchain pinned in `go.mod`. The module
+retains its Go 1.26.5 minimum so consumers can upgrade independently.
+
+Run `GOTOOLCHAIN=go1.27.3 go test ./...` and
+`GOTOOLCHAIN=go1.27.3 make lint` to validate changes. The lint version in the
+Makefile follows the CI pin.
