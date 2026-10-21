@@ -151,6 +151,7 @@ func Analyze(in Input, p Policy) (Output, error) {
 		if i > 0 && targetKey(c.Target) == targetKey(containers[i-1].Target) {
 			return Output{}, fmt.Errorf("duplicate logical container target %q", targetKey(c.Target))
 		}
+		classificationContainer := c
 		c = selectReleaseSegment(in, c)
 		for _, r := range []Resource{ResourceMemory, ResourceCPU} {
 			result, err := analyzeResource(in, c, r, p)
@@ -164,6 +165,13 @@ func Analyze(in Input, p Policy) (Output, error) {
 				}
 			}
 			out.Results = append(out.Results, result)
+		}
+		if p.Classification != nil {
+			finding, err := classifyWorkload(in, classificationContainer, p)
+			if err != nil {
+				return Output{}, fmt.Errorf("%s classification: %w", c.Target.Name, err)
+			}
+			out.Classifications = append(out.Classifications, finding)
 		}
 	}
 	return out, nil

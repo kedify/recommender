@@ -29,12 +29,13 @@ type Target struct {
 	Release     string `json:"release"`
 }
 type ContainerObservation struct {
-	Target    Target              `json:"target"`
-	Identity  CurrentIdentity     `json:"identity"`
-	Inventory Inventory           `json:"inventory"`
-	CPU       ResourceObservation `json:"cpu"`
-	Memory    ResourceObservation `json:"memory"`
-	OOMKills  []OOMKill           `json:"oomKills,omitempty"`
+	Classification *ClassificationObservation `json:"classification,omitempty"`
+	Target         Target                     `json:"target"`
+	Identity       CurrentIdentity            `json:"identity"`
+	Inventory      Inventory                  `json:"inventory"`
+	CPU            ResourceObservation        `json:"cpu"`
+	Memory         ResourceObservation        `json:"memory"`
+	OOMKills       []OOMKill                  `json:"oomKills,omitempty"`
 	// Newest first. Only the first three entries are eligible as fallback usage.
 	PreviousReleases []PreviousRelease `json:"previousReleases,omitempty"`
 }
@@ -143,9 +144,10 @@ type MemoryStrategy string
 const MemoryStrategyMax MemoryStrategy = "max"
 
 type Policy struct {
-	CPU      CPUPolicy      `json:"cpu"`
-	Memory   MemoryPolicy   `json:"memory"`
-	Evidence EvidencePolicy `json:"evidence"`
+	Classification *ClassificationPolicy `json:"classification,omitempty"`
+	CPU            CPUPolicy             `json:"cpu"`
+	Memory         MemoryPolicy          `json:"memory"`
+	Evidence       EvidencePolicy        `json:"evidence"`
 }
 type EvidencePolicy struct {
 	MinimumHistorySeconds int64   `json:"minimumHistorySeconds"`
@@ -178,11 +180,12 @@ type MemoryPolicy struct {
 	LeakDetection *MemoryLeakPolicy `json:"leakDetection,omitempty"`
 }
 type Output struct {
-	SchemaVersion   string             `json:"schemaVersion"`
-	DetectorVersion string             `json:"detectorVersion"`
-	PolicyVersion   string             `json:"policyVersion"`
-	EffectivePolicy Policy             `json:"effectivePolicy"`
-	Results         []ResourceAnalysis `json:"results"`
+	Classifications []WorkloadClassification `json:"classifications,omitempty"`
+	SchemaVersion   string                   `json:"schemaVersion"`
+	DetectorVersion string                   `json:"detectorVersion"`
+	PolicyVersion   string                   `json:"policyVersion"`
+	EffectivePolicy Policy                   `json:"effectivePolicy"`
+	Results         []ResourceAnalysis       `json:"results"`
 }
 type Resource string
 
