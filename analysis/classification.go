@@ -17,7 +17,11 @@ func classifyWorkload(in Input, c ContainerObservation, p Policy) (WorkloadClass
 	}
 	c.OOMKills = append(append([]OOMKill(nil), c.OOMKills...), obs.OOMKills...)
 	c.PreviousReleases = nil
-	c = selectReleaseSegment(in, c)
+	// Throttling can establish the classification window, but is never usage
+	// evidence for variance, memory leaks, or resource sizing.
+	releaseEvidence := c
+	releaseEvidence.CPU.Series = slices.Concat(c.CPU.Series, obs.Throttling.Seconds, obs.Throttling.ThrottledPeriods, obs.Throttling.Periods)
+	c.Identity = selectReleaseSegment(in, releaseEvidence).Identity
 	start := max(in.WindowStart, c.Identity.ReleaseStartedAt)
 	out := WorkloadClassification{DetectorVersion: ClassificationDetectorVersion, Target: c.Target, WindowStart: start, WindowEnd: in.EvaluationTime, Features: []WorkloadFeature{}, Issues: append([]string(nil), obs.Issues...)}
 	features := []WorkloadFeature{FeatureLeaderElection, FeatureHighVarianceCPU, FeatureHighVarianceMemory, FeatureOOMKilled, FeatureMemoryLeak, FeatureCPUThrottled, FeatureHTTPTraffic, FeatureMetrics}
@@ -144,14 +148,23 @@ func classifyVariance(in Input, c ContainerObservation, series []Series, floor f
 		if s.WorkloadUID != c.Target.WorkloadUID || s.Release != c.Target.Release {
 			continue
 		}
-		raw, err := NormalizeSamples(s, max(in.WindowStart, c.Identity.ReleaseStartedAt), in.EvaluationTime)
+		windowStart := max(in.WindowStart, c.Identity.ReleaseStartedAt)
+		raw, err := NormalizeSamples(s, windowStart, in.EvaluationTime)
 		if err != nil {
 			return f, err
 		}
 		if len(raw) < 2 {
 			continue
 		}
-		start := max(raw[0].Timestamp+5*60*1000, in.EvaluationTime-24*3600*1000)
+		// Counter conversion omits the initial source sample. Warmup starts
+		// with that observation, just as it does for equivalent gauge data.
+		firstSample := raw[0].Timestamp
+		for _, sample := range s.Samples {
+			if sample.Timestamp >= windowStart && sample.Timestamp < firstSample {
+				firstSample = sample.Timestamp
+			}
+		}
+		start := max(firstSample+5*60*1000, in.EvaluationTime-24*3600*1000)
 		values := make([]Sample, 0, len(raw))
 		for _, v := range raw {
 			if v.Timestamp >= start {
@@ -285,10 +298,12 @@ func classifyThrottling(in Input, c ContainerObservation, obs CPUThrottlingObser
 		intervals := make([][]CounterInterval, 3)
 		for i, g := range groups {
 			if s, ok := g[id]; ok {
-				if e.PodUID != "" && s.PodUID != e.PodUID {
-					return f, fmt.Errorf("throttling counter identities disagree")
+				if s.PodUID != "" {
+					if e.PodUID != "" && s.PodUID != e.PodUID {
+						return f, fmt.Errorf("throttling counter identities disagree")
+					}
+					e.PodUID = s.PodUID
 				}
-				e.PodUID = s.PodUID
 				var err error
 				intervals[i], err = CounterIntervals(s, max(in.WindowStart, c.Identity.ReleaseStartedAt), in.EvaluationTime)
 				if err != nil {
