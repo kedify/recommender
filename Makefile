@@ -23,7 +23,7 @@ build:
 .PHONY: check
 check: fmt vet test build
 
-GOLANGCI_LINT_VERSION ?= v2.12.2
+GOLANGCI_LINT_VERSION ?= v2.15.0
 
 .PHONY: lint
 lint:

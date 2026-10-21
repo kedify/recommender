@@ -44,13 +44,13 @@ jobs:
       - name: Run golangci-lint
         uses: golangci/golangci-lint-action@82606bf257cbaff209d206a39f5134f0cfbfd2ee # v9.2.1
         with:
-          version: v2.12.2
+          version: v2.15.0
           args: --timeout=10m
 
       - name: Run staticcheck
         uses: dominikh/staticcheck-action@9716614d4101e79b4340dd97b10e54d68234e431 # v1
         with:
-          version: v0.8.0
+          version: v0.8.2
           install-go: false
 
       - name: Run vulncheck
@@ -62,9 +62,10 @@ jobs:
           echo '```' >> "$GITHUB_STEP_SUMMARY"
 
       - name: Run Gosec Security Scanner
-        uses: securego/gosec@bb17e422fc34bf4c0a2e5cab9d07dc45a68c040c # v2.24.7
-        with:
-          args: '-no-fail -fmt sarif -out results.sarif ./...'
+        # Use a pinned revision with x/tools support for Go 1.27.3 export data.
+        run: >-
+          go run github.com/securego/gosec/v2/cmd/gosec@17ad2dd7533fd4c773d916e2bc81446917d593b5
+          -no-fail -fmt sarif -out results.sarif ./...
 
       - name: Normalize SARIF for GitHub upload
         run: |
