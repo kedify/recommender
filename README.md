@@ -403,8 +403,8 @@ assigns `cpu-throttled`. Evidence reports throttled seconds per observed second
 and throttled-period percentage only over matching denominator intervals.
 Seconds per second may exceed one; this does not estimate application latency.
 
-Development and CI use the Go 1.27.3 toolchain pinned in `go.mod`. The module
-retains its Go 1.26.5 minimum so consumers can upgrade independently.
+Development, CI, and consumers of this module require Go 1.27.3 or later,
+as specified in `go.mod`.
 
 Run `GOTOOLCHAIN=go1.27.3 go test ./...` and
 `GOTOOLCHAIN=go1.27.3 make lint` to validate changes. The lint version in the
