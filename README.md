@@ -16,7 +16,7 @@ output, err := analysis.Analyze(snapshot, policy)
 
 Callers fetch raw range vectors and map them into `analysis.Input`; calculations
 and CPU counter normalization happen in this package. Input schema v2 rejects v1
-input; results use output schema v3 and resource detector version 8. Consumers
+input; results use output schema v3 and resource detector version 9. Consumers
 should update generated output bindings and invalidate cached findings when upgrading.
 All timestamps are original Unix milliseconds, including current settings and
 identity. Do not stamp carried-forward values with query evaluation times. CPU
@@ -47,8 +47,11 @@ Each resource independently reports observed start/end, distinct sample count,
 series count, inferred median cadence and coverage. Coverage
 is the union of observed timestamps for the current release across pod lifetimes,
 divided by the selected release segment duration rather than pre-release lookback,
-with intervals capped at the median source cadence and one cadence of edge
-tolerance. Healthy scale-out or pod replacement retains established release history.
+with intervals capped at 1.25 times the median source cadence to tolerate bounded
+timestamp jitter, and one cadence of edge tolerance. The same interval cap applies
+to the supporting series' confidence. Longer collection gaps still reduce coverage;
+no samples are interpolated. Healthy scale-out or pod replacement retains
+established release history.
 `sampleCount` reports all distinct per-series samples; `observationCount` reports
 distinct timestamps across series after normalization (including CPU counter
 conversion) and is the count checked against `minimumSamples`. Confidence uses unique release

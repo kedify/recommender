@@ -1,6 +1,6 @@
 {
   "schemaVersion": "resource-analysis-output/v3",
-  "detectorVersion": "8",
+  "detectorVersion": "9",
   "policyVersion": "v2:05fcc132cfc77a9510dabdd15412df2f86e5ee8b8c8c703ea3f3738423463a51",
   "effectivePolicy": {
     "cpu": {
