@@ -8,7 +8,7 @@ package analysis
 const (
 	InputSchemaVersion               = "resource-analysis-input/v2"
 	OutputSchemaVersion              = "resource-analysis-output/v3"
-	ResourceRightSizeDetectorVersion = "8"
+	ResourceRightSizeDetectorVersion = "9"
 	MaxPreviousReleases              = 3
 )
 
