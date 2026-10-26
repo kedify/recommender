@@ -395,6 +395,14 @@ Replicas and previous releases are never pooled. Memory-leak classification uses
 the existing leak detector and its defaults; classification-only OOM kills split
 leak episodes but do not participate in sizing.
 
+Each evaluated variance series exposes `mean`, `standardDeviation`, and `variance`
+alongside `coefficientOfVariation` and `spread`. These are the time-weighted
+population statistics used by the classifier, excluding gaps longer than three
+sample cadences. CPU values use millicores, memory values use bytes, and variance
+uses squared units. Zero-valued statistics remain present in JSON; insufficient
+history produces no variance evidence. Consumers can display these values without
+recalculating them from the input samples.
+
 `CPUThrottlingObservation` supplies `Seconds`, `ThrottledPeriods`, and `Periods`
 as optional `Series` lists with `Kind: SampleGauge`. Values are cumulative raw
 counters for `container_cpu_cfs_throttled_seconds_total`,

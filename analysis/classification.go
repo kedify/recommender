@@ -197,8 +197,11 @@ func classifyVariance(in Input, c ContainerObservation, series []Series, floor f
 			continue
 		}
 		e := VarianceEvidence{SeriesID: s.ID, PodUID: s.PodUID, ObservedStart: values[0].Timestamp, ObservedEnd: values[len(values)-1].Timestamp, SampleCount: len(values), Coverage: coverage}
+		e.Mean = mean
+		e.Variance = math.Max(0, m2/covered)
+		e.StandardDeviation = math.Sqrt(e.Variance)
 		if mean > 0 {
-			e.CoefficientOfVariation = math.Sqrt(math.Max(0, m2/covered)) / mean
+			e.CoefficientOfVariation = e.StandardDeviation / mean
 		}
 		sorted := make([]float64, len(values))
 		for i, v := range values {
@@ -206,7 +209,7 @@ func classifyVariance(in Input, c ContainerObservation, series []Series, floor f
 		}
 		sort.Float64s(sorted)
 		e.Spread = sorted[int(math.Ceil(.95*float64(len(sorted))))-1] - sorted[int(math.Ceil(.05*float64(len(sorted))))-1]
-		if !finite(e.CoefficientOfVariation) || !finite(e.Spread) {
+		if !finite(e.Mean) || !finite(e.Variance) || !finite(e.StandardDeviation) || !finite(e.CoefficientOfVariation) || !finite(e.Spread) {
 			return f, fmt.Errorf("variance outside numeric range")
 		}
 		f.Variance = append(f.Variance, e)

@@ -97,6 +97,10 @@ type FeatureFinding struct {
 	OOMKills   []OOMKill               `json:"oomKills,omitempty"`
 	MemoryLeak *MemoryLeakAnalysis     `json:"memoryLeak,omitempty"`
 }
+
+// VarianceEvidence reports the time-weighted population statistics used by the
+// classifier for one container lifetime. CPU values use millicores, memory values
+// use bytes, and Variance uses the square of those units. Zero values are retained.
 type VarianceEvidence struct {
 	SeriesID               string  `json:"seriesID"`
 	PodUID                 string  `json:"podUID,omitempty"`
@@ -104,6 +108,9 @@ type VarianceEvidence struct {
 	ObservedEnd            int64   `json:"observedEnd"`
 	SampleCount            int     `json:"sampleCount"`
 	Coverage               float64 `json:"coverage"`
+	Mean                   float64 `json:"mean"`
+	StandardDeviation      float64 `json:"standardDeviation"`
+	Variance               float64 `json:"variance"`
 	CoefficientOfVariation float64 `json:"coefficientOfVariation"`
 	Spread                 float64 `json:"spread"`
 }
