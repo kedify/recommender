@@ -4,7 +4,7 @@
 
 package analysis
 
-const MemoryLeakDetectorVersion = "3"
+const MemoryLeakDetectorVersion = "4"
 
 // MemoryLeakPolicy enables an advisory heuristic, not a diagnosis. Zero fields
 // select defaults. Setting MemoryPolicy.LeakDetection to nil disables detection.
@@ -44,8 +44,11 @@ const (
 // proves whether allocations are useful: load, caches and runtime heaps are not
 // part of this input. The independent detector version identifies this heuristic.
 type MemoryLeakAnalysis struct {
-	DetectorVersion   string               `json:"detectorVersion"`
-	Status            MemoryLeakStatus     `json:"status"`
+	DetectorVersion string           `json:"detectorVersion"`
+	Status          MemoryLeakStatus `json:"status"`
+	// Confidence is the strongest positive episode's evidence score (0–95), not
+	// a probability of a leak or confidence in unaffected replicas.
+	Confidence        int                  `json:"confidence,omitempty"`
 	WindowStart       int64                `json:"windowStart"`
 	WindowEnd         int64                `json:"windowEnd"`
 	EvaluatedEpisodes int                  `json:"evaluatedEpisodes"`
@@ -61,7 +64,8 @@ type MemoryLeakAnalysis struct {
 // Theil-Sen (median pairwise slope); consistency is the fraction of increasing
 // pairs, not a probability or statistical confidence. RelativeGrowth is absent
 // when the starting baseline is zero. Recent statistics use the latest quarter
-// of buckets, with a minimum of six buckets. OOMKillIDs refer to evidence.oomKills
+// of buckets, with a minimum of six (three to five for early findings).
+// OOMKillIDs refer to evidence.oomKills
 // and only corroborate an episode when its last sample is close to that termination.
 type MemoryLeakEvidence struct {
 	SeriesID                string           `json:"seriesID"`
@@ -72,6 +76,8 @@ type MemoryLeakEvidence struct {
 	SampleCount             int              `json:"sampleCount"`
 	BucketCount             int              `json:"bucketCount"`
 	Coverage                float64          `json:"coverage"`
+	UsableHistoryHours      float64          `json:"usableHistoryHours"`
+	Confidence              int              `json:"confidence,omitempty"`
 	BaselineStartBytes      float64          `json:"baselineStartBytes"`
 	BaselineEndBytes        float64          `json:"baselineEndBytes"`
 	GrowthBytes             float64          `json:"growthBytes"`
