@@ -302,7 +302,7 @@ func TestMemoryLeakInsufficientEvidence(t *testing.T) {
 		mutate func(*Input)
 		reason Reason
 	}{
-		{"short history", func(in *Input) { *in = leakFixture(3, func(h float64) float64 { return 100 + 100*h }) }, ReasonMemoryLeakBuckets},
+		{"short history", func(in *Input) { *in = leakFixture(2, func(h float64) float64 { return 100 + 100*h }) }, ReasonMemoryLeakBuckets},
 		{"no usage", func(in *Input) { in.Containers[0].Memory.Series = nil }, ReasonMissingUsage},
 		{"stale identity", func(in *Input) { in.Containers[0].Identity.Timestamp = epoch }, ReasonStaleIdentity},
 		{"ambiguous identity", func(in *Input) { in.Containers[0].Identity.Ambiguous = true }, ReasonAmbiguousIdentity},
@@ -470,7 +470,7 @@ func TestMemoryLeakPolicyValidationAndIdentity(t *testing.T) {
 	if *p.Memory.LeakDetection != (MemoryLeakPolicy{}) {
 		t.Fatal("normalization mutated caller's pointer")
 	}
-	if q.Memory.LeakDetection.LookbackSeconds != 86400 || q.Memory.LeakDetection.MinimumGrowthBytes != 64*mib {
+	if q.Memory.LeakDetection.LookbackSeconds != 86400 || q.Memory.LeakDetection.MinimumGrowthBytes != 16*mib || q.Memory.LeakDetection.MinimumHistorySeconds != 2*3600 {
 		t.Fatalf("wrong defaults: %+v", q.Memory.LeakDetection)
 	}
 	defaultVersion, _ := PolicyVersion(Policy{})

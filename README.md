@@ -246,7 +246,7 @@ ever-higher peaks that may be reclaimed by GC:
    each bucket and take P10: the value at the one-based rank `ceil(0.10 * count)`.
    This estimates the lower baseline and reduces the effect of short-lived peaks;
    it is not a measurement of live heap or a detected GC event.
-3. Require at least six hours after warmup and at least 12 usable complete buckets,
+3. Require at least two hours after warmup and at least four usable complete buckets,
    each with five distinct source samples. Skip empty or undersampled buckets;
    they need not be adjacent and are never replaced with zero-valued baselines.
    Apply `evidence.minimumCoverage` to the **whole episode** (default 90%),
@@ -261,9 +261,10 @@ ever-higher peaks that may be reclaimed by GC:
    actual elapsed time so missing buckets do not compress time, implemented locally
    without dependencies. Require a positive slope and at least 80% of earlier/later
    bucket pairs to increase. The median baseline of the last quarter of buckets
-   must exceed that of the first quarter by both 64 MiB and 20%. When the starting
+   must exceed that of the first quarter by both 16 MiB and 5%. When the starting
    baseline is zero, only the absolute growth threshold applies.
-5. Require the trend to continue in the latest quarter (at least six buckets):
+5. Require the trend to continue in the latest quarter (at least six buckets,
+   or the latest three to five buckets for early findings):
    the same 80% consistency threshold and a slope at least 25% of the whole-episode
    slope. This suppresses startup steps, caches that have plateaued, and sustained
    recovery. Correlated OOMs support the finding but never establish a leak alone.
@@ -271,9 +272,9 @@ ever-higher peaks that may be reclaimed by GC:
 Tune the exposed lookback, bucket duration, warmup, minimum history/samples,
 absolute/relative growth, and trend consistency through `MemoryLeakPolicy`.
 Durations use seconds; zero fields select defaults. Policies must retain at least
-12 buckets of minimum history and at most 256 buckets in the lookback, bounding the
+four buckets of minimum history and at most 256 buckets in the lookback, bounding the
 pairwise computation independently of the number of raw samples. P10 and the recent
-trend check are fixed parts of detector version `3`.
+trend check are fixed parts of detector version `4`.
 
 Each memory result gains `memoryLeak`, including:
 
@@ -289,11 +290,22 @@ Each memory result gains `memoryLeak`, including:
   in bytes/hour, and trend consistency. Consistency is a measured fraction of
   increasing pairs, **not a probability of a leak**. `relativeGrowth` is omitted
   when the starting baseline is zero.
+- `usableHistoryHours`: complete buckets with enough source samples, excluding
+  warmup and unusable buckets. This is the history used for the confidence score.
+- `confidence`: a positive finding's heuristic evidence-strength score (0–95),
+  separate from sizing confidence and **not a calibrated probability of a leak**.
+  Shorter history and smaller absolute/relative growth receive lower scores.
+  History strength saturates at six usable hours (or a longer configured minimum);
+  growth strength saturates when both growth measures reach four times their
+  configured thresholds. The score is `round(95 * sqrt(historyStrength *
+  growthStrength) * coverage * min(overallConsistency, recentConsistency))`.
+  The summary reports the strongest positive episode's score; it does not imply
+  complete evidence for other replicas. Nonpositive findings omit this field.
 - `oomKillIDs` on corroborated episodes, referencing the existing `evidence.oomKills`.
   A positive finding also adds `potential-memory-leak` to the resource's `notices`.
 
 This diagnostic does not modify request/limit recommendations, sizing confidence,
-or existing OOM adjustments. Its default six-hour history requirement is
+or existing OOM adjustments. Its default two-hour history requirement is
 independent of the default one-hour sizing guard. A caller can configure a longer
 sizing minimum, allowing leak detection to report a pattern while sizing remains
 blocked. Missing resource settings or incomplete inventory do not prevent this
@@ -394,6 +406,14 @@ latest supplied 24 hours, excludes five minutes of warmup, and requires at least
 Replicas and previous releases are never pooled. Memory-leak classification uses
 the existing leak detector and its defaults; classification-only OOM kills split
 leak episodes but do not participate in sizing.
+
+Each evaluated variance series exposes `mean`, `standardDeviation`, and `variance`
+alongside `coefficientOfVariation` and `spread`. These are the time-weighted
+population statistics used by the classifier, excluding gaps longer than three
+sample cadences. CPU values use millicores, memory values use bytes, and variance
+uses squared units. Zero-valued statistics remain present in JSON; insufficient
+history produces no variance evidence. Consumers can display these values without
+recalculating them from the input samples.
 
 `CPUThrottlingObservation` supplies `Seconds`, `ThrottledPeriods`, and `Periods`
 as optional `Series` lists with `Kind: SampleGauge`. Values are cumulative raw

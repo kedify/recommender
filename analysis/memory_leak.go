@@ -10,7 +10,10 @@ import (
 	"sort"
 )
 
-const maxMemoryLeakBuckets = 256
+const (
+	minMemoryLeakBuckets = 4
+	maxMemoryLeakBuckets = 256
+)
 
 func normalizeMemoryLeakPolicy(p MemoryLeakPolicy) (MemoryLeakPolicy, error) {
 	for _, field := range []struct {
@@ -19,7 +22,7 @@ func normalizeMemoryLeakPolicy(p MemoryLeakPolicy) (MemoryLeakPolicy, error) {
 	}{
 		{&p.LookbackSeconds, 24 * 3600},
 		{&p.BucketDurationSeconds, 30 * 60},
-		{&p.MinimumHistorySeconds, 6 * 3600},
+		{&p.MinimumHistorySeconds, 2 * 3600},
 		{&p.WarmupSeconds, 30 * 60},
 	} {
 		if *field.value == 0 {
@@ -33,10 +36,10 @@ func normalizeMemoryLeakPolicy(p MemoryLeakPolicy) (MemoryLeakPolicy, error) {
 		p.MinimumSamplesPerBucket = 5
 	}
 	if p.MinimumGrowthBytes == 0 {
-		p.MinimumGrowthBytes = 64 * 1024 * 1024
+		p.MinimumGrowthBytes = 16 * 1024 * 1024
 	}
 	if p.MinimumRelativeGrowth == 0 {
-		p.MinimumRelativeGrowth = .2
+		p.MinimumRelativeGrowth = .05
 	}
 	if p.MinimumTrendConsistency == 0 {
 		p.MinimumTrendConsistency = .8
@@ -44,8 +47,8 @@ func normalizeMemoryLeakPolicy(p MemoryLeakPolicy) (MemoryLeakPolicy, error) {
 	if p.MinimumSamplesPerBucket < 2 || !positive(p.MinimumGrowthBytes) || !positive(p.MinimumRelativeGrowth) || !finite(p.MinimumTrendConsistency) || p.MinimumTrendConsistency <= .5 || p.MinimumTrendConsistency > 1 {
 		return MemoryLeakPolicy{}, fmt.Errorf("invalid memory.leakDetection samples, growth thresholds or trend consistency (must be in (0.5,1])")
 	}
-	if p.MinimumHistorySeconds > p.LookbackSeconds || p.WarmupSeconds >= p.LookbackSeconds || p.MinimumHistorySeconds/p.BucketDurationSeconds < 12 {
-		return MemoryLeakPolicy{}, fmt.Errorf("memory.leakDetection requires at least 12 buckets of history within the lookback and a shorter warmup")
+	if p.MinimumHistorySeconds > p.LookbackSeconds || p.WarmupSeconds >= p.LookbackSeconds || p.MinimumHistorySeconds/p.BucketDurationSeconds < minMemoryLeakBuckets {
+		return MemoryLeakPolicy{}, fmt.Errorf("memory.leakDetection requires at least %d buckets of history within the lookback and a shorter warmup", minMemoryLeakBuckets)
 	}
 	// Bound quadratic pairwise regression independently of raw sample count.
 	if p.LookbackSeconds/p.BucketDurationSeconds > maxMemoryLeakBuckets || p.LookbackSeconds/p.BucketDurationSeconds == maxMemoryLeakBuckets && p.LookbackSeconds%p.BucketDurationSeconds != 0 {
@@ -119,6 +122,7 @@ func analyzeMemoryLeak(in Input, c ContainerObservation, p Policy, resource Reso
 			case MemoryLeakPotential:
 				out.SuspectedEpisodes++
 				out.EvaluatedEpisodes++
+				out.Confidence = max(out.Confidence, evidence.Confidence)
 			case MemoryLeakNoPattern:
 				out.EvaluatedEpisodes++
 			case MemoryLeakInsufficientData:
@@ -214,7 +218,7 @@ func analyzeMemoryEpisode(in Input, s Series, episode memoryEpisode, windowStart
 	end := e.ObservedEnd + int64(math.Min(cadence, float64(in.EvaluationTime-e.ObservedEnd)))
 	bucketMillis := lp.BucketDurationSeconds * 1000
 	e.BucketCount = int((end - start) / bucketMillis)
-	if e.BucketCount < 12 || int64(e.BucketCount)*lp.BucketDurationSeconds < lp.MinimumHistorySeconds {
+	if e.BucketCount < minMemoryLeakBuckets || int64(e.BucketCount)*lp.BucketDurationSeconds < lp.MinimumHistorySeconds {
 		e.Reasons = append(e.Reasons, ReasonMemoryLeakBuckets)
 		return e
 	}
@@ -249,10 +253,11 @@ func analyzeMemoryEpisode(in Input, s Series, episode memoryEpisode, windowStart
 		baselineHours = append(baselineHours, float64(i)*float64(lp.BucketDurationSeconds)/3600)
 	}
 	e.Coverage = math.Min(1, e.Coverage)
+	e.UsableHistoryHours = float64(len(baselines)) * float64(lp.BucketDurationSeconds) / 3600
 	if e.Coverage < p.Evidence.MinimumCoverage {
 		e.Reasons = appendUniqueReason(e.Reasons, ReasonSparseCoverage)
 	}
-	if len(baselines) < 12 || int64(len(baselines))*lp.BucketDurationSeconds < lp.MinimumHistorySeconds {
+	if len(baselines) < minMemoryLeakBuckets || int64(len(baselines))*lp.BucketDurationSeconds < lp.MinimumHistorySeconds {
 		e.Reasons = appendUniqueReason(e.Reasons, ReasonMemoryLeakBuckets)
 	}
 	if len(e.Reasons) > 0 {
@@ -272,8 +277,9 @@ func analyzeMemoryEpisode(in Input, s Series, episode memoryEpisode, windowStart
 	}
 	e.SlopeBytesPerHour, e.TrendConsistency = memoryBaselineTrend(baselines, baselineHours)
 	// Require growth to continue near the end, not just earlier in the lookback.
-	// Six buckets keep this check meaningful even with the minimum history.
-	recentBuckets := max(6, len(baselines)/4)
+	// Early findings use the latest three to five buckets, then narrow to the
+	// latest quarter (at least six) as history accumulates.
+	recentBuckets := min(len(baselines)-1, max(6, len(baselines)/4))
 	e.RecentSlopeBytesPerHour, e.RecentTrendConsistency = memoryBaselineTrend(baselines[len(baselines)-recentBuckets:], baselineHours[len(baselines)-recentBuckets:])
 	if !finite(e.SlopeBytesPerHour) || !finite(e.RecentSlopeBytesPerHour) {
 		e.SlopeBytesPerHour, e.RecentSlopeBytesPerHour = 0, 0
@@ -290,11 +296,26 @@ func analyzeMemoryEpisode(in Input, s Series, episode memoryEpisode, windowStart
 		return e
 	}
 	e.Status = MemoryLeakPotential
+	e.Confidence = memoryLeakConfidence(e, lp)
 	e.Reasons = append(e.Reasons, ReasonMemoryBaselineGrowth)
 	if len(e.OOMKillIDs) > 0 {
 		e.Reasons = append(e.Reasons, ReasonOOMKillDetected)
 	}
 	return e
+}
+
+// This is an evidence-strength score, not a calibrated probability of a leak.
+// Short history and modest growth can qualify without receiving the same score
+// as a longer, larger, well-covered trend. Sizing confidence is independent.
+func memoryLeakConfidence(e MemoryLeakEvidence, p MemoryLeakPolicy) int {
+	historyReferenceHours := math.Max(6, float64(p.MinimumHistorySeconds)/3600)
+	historyStrength := math.Min(1, e.UsableHistoryHours/historyReferenceHours)
+	growthStrength := math.Min(1, e.GrowthBytes/p.MinimumGrowthBytes/4)
+	if e.RelativeGrowth != nil {
+		growthStrength = math.Min(growthStrength, *e.RelativeGrowth/p.MinimumRelativeGrowth/4)
+	}
+	consistency := math.Min(e.TrendConsistency, e.RecentTrendConsistency)
+	return int(math.Round(95 * math.Sqrt(historyStrength*growthStrength) * e.Coverage * consistency))
 }
 
 func memoryBaselineTrend(values, hours []float64) (float64, float64) {
