@@ -66,10 +66,13 @@ func TestAKSOOMPairedPatch(t *testing.T) {
 	if err := read.Verify(); err == nil {
 		t.Fatal("changed release passed digest verification")
 	}
-	if !RequiresPair(output.Results[1]) {
+	if !UnsafeStandalone(output.Results[1]) {
 		t.Fatal("legacy singleton commands must be suppressed")
 	}
 	output.Results[1].Recommendations = output.Results[1].Recommendations[:1]
+	if !UnsafeStandalone(output.Results[1]) {
+		t.Fatal("single request above the existing limit must not advertise a command")
+	}
 	if _, err := Build("synthetic-cluster", "", target, 1234, output, nil); err == nil || !strings.Contains(err.Error(), "exceeds the resulting limit") {
 		t.Fatalf("request-only error: %v", err)
 	}
@@ -84,5 +87,21 @@ func TestBeforeStateMustMatch(t *testing.T) {
 	output.Results[1].Evidence.CurrentLimit.Available = false
 	if _, err := Build("synthetic-cluster", "", target, 1234, output, nil); err == nil {
 		t.Fatal("unknown limit accepted")
+	}
+}
+
+func TestVerifyRejectsMismatchedPayload(t *testing.T) {
+	target, output := oomResult()
+	doc, err := Build("synthetic-cluster", "", target, 1234, output, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	doc.Artifact.Patch = json.RawMessage(`{"spec":{}}`)
+	doc.Digest, err = checksum(doc.Artifact)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := doc.Verify(); err == nil {
+		t.Fatal("unrelated payload passed verification with a matching digest")
 	}
 }

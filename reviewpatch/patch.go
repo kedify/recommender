@@ -6,6 +6,7 @@
 package reviewpatch
 
 import (
+	"bytes"
 	"crypto/sha256"
 	"encoding/json"
 	"errors"
@@ -78,6 +79,7 @@ const (
 type Review struct {
 	Document        Document `json:"document"`
 	Checks          []Check  `json:"checks"`
+	CheckedAt       int64    `json:"checkedAt,omitempty"` // Unix milliseconds.
 	Generation      int64    `json:"generation,omitempty"`
 	ResourceVersion string   `json:"resourceVersion,omitempty"`
 }
@@ -288,30 +290,47 @@ func equal(a, b *int64) bool {
 	return a == nil && b == nil || a != nil && b != nil && *a == *b
 }
 
-// RequiresPair reports whether a resource has two proposed settings and one
-// would violate request <= limit against the unchanged current counterpart.
-func RequiresPair(result analysis.ResourceAnalysis) bool {
-	if len(result.Recommendations) != 2 {
-		return false
+// UnsafeStandalone reports whether a recommendation would violate request <=
+// limit with the other setting left at its observed current value.
+func UnsafeStandalone(result analysis.ResourceAnalysis) bool {
+	for _, row := range result.Recommendations {
+		suggested := math.Ceil(row.SuggestedValue)
+		switch row.Setting {
+		case analysis.SettingRequests:
+			limit := result.Evidence.CurrentLimit
+			if limit.Available && !limit.Unset && suggested > limit.Value {
+				return true
+			}
+		case analysis.SettingLimits:
+			request := result.Evidence.CurrentRequest
+			if request.Available && !request.Unset && suggested < request.Value {
+				return true
+			}
+		}
 	}
-	request, limit := result.Recommendations[0], result.Recommendations[1]
-	if request.Setting == analysis.SettingLimits {
-		request, limit = limit, request
-	}
-	return request.Setting == analysis.SettingRequests && limit.Setting == analysis.SettingLimits &&
-		(!limit.CurrentUnset && math.Ceil(request.SuggestedValue) > limit.CurrentValue ||
-			!request.CurrentUnset && math.Ceil(limit.SuggestedValue) < request.CurrentValue)
+	return false
 }
 
 func renderPatch(artifact Artifact) (json.RawMessage, error) {
 	settings := map[string]map[analysis.Resource]string{}
+	seen := map[analysis.Resource]bool{}
 	for _, change := range artifact.Changes {
+		if (change.Resource != analysis.ResourceCPU && change.Resource != analysis.ResourceMemory) || seen[change.Resource] {
+			return nil, errors.New("unsupported or duplicate patch resource")
+		}
+		seen[change.Resource] = true
+		if change.After.Request != nil && change.After.Limit != nil && *change.After.Request > *change.After.Limit {
+			return nil, errors.New("proposed request exceeds the resulting limit")
+		}
 		for _, pair := range []struct {
 			key           string
 			before, after *int64
 		}{{"requests", change.Before.Request, change.After.Request}, {"limits", change.Before.Limit, change.After.Limit}} {
 			if equal(pair.before, pair.after) {
 				continue
+			}
+			if pair.after == nil || *pair.after <= 0 {
+				return nil, errors.New("patch requires a positive quantity for each changed setting")
 			}
 			if settings[pair.key] == nil {
 				settings[pair.key] = map[analysis.Resource]string{}
@@ -323,6 +342,9 @@ func renderPatch(artifact Artifact) (json.RawMessage, error) {
 			settings[pair.key][change.Resource] = value
 		}
 	}
+	if len(settings) == 0 {
+		return nil, errors.New("patch contains no effective changes")
+	}
 	return json.Marshal(map[string]any{
 		"metadata": map[string]string{"uid": artifact.Target.WorkloadUID},
 		"spec": map[string]any{"template": map[string]any{"spec": map[string]any{
@@ -331,11 +353,30 @@ func renderPatch(artifact Artifact) (json.RawMessage, error) {
 	})
 }
 
-// Verify checks the stored digest against the compact contract encoding.
+// Verify checks patch consistency and the stored digest. It does not authorize a change.
 func (d Document) Verify() error {
-	if d.Artifact.SchemaVersion != SchemaVersion {
+	if d.Artifact.SchemaVersion != SchemaVersion || d.Artifact.APIVersion != "apps/v1" {
 		return errors.New("unsupported review patch schema")
 	}
+	if err := ValidateTarget(d.Artifact.Target); err != nil {
+		return err
+	}
+	canonical, err := renderPatch(d.Artifact)
+	if err != nil {
+		return err
+	}
+	var patch any
+	if err := json.Unmarshal(d.Artifact.Patch, &patch); err != nil {
+		return err
+	}
+	encoded, err := json.Marshal(patch)
+	if err != nil {
+		return err
+	}
+	if !bytes.Equal(canonical, encoded) {
+		return errors.New("patch does not match the reviewed settings")
+	}
+	d.Artifact.Patch = canonical
 	digest, err := checksum(d.Artifact)
 	if err != nil {
 		return err
