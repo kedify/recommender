@@ -309,7 +309,7 @@ func validateChange(change Change) error {
 	if change.After.Request == nil && !equal(change.Before.Limit, change.After.Limit) {
 		return errors.New("a limit change with an unset request would change Pod request defaulting")
 	}
-	if change.After.Request != nil && change.After.Limit != nil && *change.After.Limit > 0 && *change.After.Request > *change.After.Limit {
+	if change.After.Request != nil && change.After.Limit != nil && *change.After.Request > *change.After.Limit {
 		return errors.New("proposed request exceeds the resulting limit")
 	}
 	return nil
@@ -319,15 +319,15 @@ func equal(a, b *int64) bool {
 	return a == nil && b == nil || a != nil && b != nil && *a == *b
 }
 
-// UnsafeStandalone reports whether a recommendation would violate request <=
-// limit with the other setting left at its observed current value.
+// UnsafeStandalone reports whether a recommendation on its own would violate
+// request <= limit or implicitly change the request through Pod defaulting.
 func UnsafeStandalone(result analysis.ResourceAnalysis) bool {
 	for _, row := range result.Recommendations {
 		suggested := math.Ceil(snapQuantity(result.Resource, row.SuggestedValue))
 		switch row.Setting {
 		case analysis.SettingRequests:
 			limit := result.Evidence.CurrentLimit
-			if limit.Available && !limit.Unset && limit.Value > 0 && suggested > snapQuantity(result.Resource, limit.Value) {
+			if limit.Available && !limit.Unset && suggested > snapQuantity(result.Resource, limit.Value) {
 				return true
 			}
 		case analysis.SettingLimits:

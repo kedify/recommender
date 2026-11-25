@@ -106,12 +106,12 @@ func TestVerifyRejectsMismatchedPayload(t *testing.T) {
 	}
 }
 
-func TestCPUConversionNoiseAndUnlimitedLimit(t *testing.T) {
+func TestCPUConversionNoiseAndUnsetLimit(t *testing.T) {
 	target, output := oomResult()
 	result := &output.Results[0]
 	result.Evidence = output.Results[1].Evidence
 	result.Evidence.CurrentRequest = analysis.Signal{Available: true, Value: 1000.9999999999999}
-	result.Evidence.CurrentLimit = analysis.Signal{Available: true, Value: 0}
+	result.Evidence.CurrentLimit = analysis.Signal{Available: true, Unset: true}
 	result.Recommendations = []analysis.Recommendation{
 		{Setting: analysis.SettingRequests, CurrentValue: 1001.0000000000001, SuggestedValue: 1100.0000000000002},
 	}
@@ -127,6 +127,20 @@ func TestCPUConversionNoiseAndUnlimitedLimit(t *testing.T) {
 	result.Evidence.CurrentRequest.Value = 1001.5
 	if _, err := Build("cluster", "", target, 1234, output, nil); err == nil {
 		t.Fatal("fractional millicore baseline accepted")
+	}
+}
+
+func TestRequestIncreaseWithExplicitZeroLimitIsWithheld(t *testing.T) {
+	target, output := oomResult()
+	result := &output.Results[1]
+	result.Evidence.CurrentRequest = analysis.Signal{Available: true, Value: 0}
+	result.Evidence.CurrentLimit = analysis.Signal{Available: true, Value: 0}
+	result.Recommendations = []analysis.Recommendation{{Setting: analysis.SettingRequests, SuggestedValue: 104857600}}
+	if !UnsafeStandalone(*result) {
+		t.Fatal("standalone request increase exceeds the explicit limit")
+	}
+	if _, err := Build("cluster", "", target, 1234, output, nil); err == nil || !strings.Contains(err.Error(), "exceeds the resulting limit") {
+		t.Fatalf("unexpected result: %v", err)
 	}
 }
 
