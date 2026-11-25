@@ -95,7 +95,10 @@ current settings across replicas must be marked unavailable by the adapter.
 
 For a current request or limit that is known to be absent, supply
 `Signal{Available: true, Unset: true, Timestamp: observedAt}`. This is distinct
-from an observed numeric zero and from `Available: false` (unknown). The value
+from an observed numeric zero and from `Available: false` (unknown). Reviewed
+patches treat an explicit zero limit as a configured ceiling and withhold a
+request change when its baseline might be inherited from a configured limit.
+The value
 must remain zero when `Unset` is true; it is a placeholder, not an allocation.
 Since detector version 7, initializing an unset setting bypasses absolute and
 relative minimum-change thresholds. Evidence, freshness, bounds, inventory,
