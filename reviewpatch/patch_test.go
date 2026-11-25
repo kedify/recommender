@@ -156,3 +156,18 @@ func TestLimitOnlyChangeWithUnsetRequestIsWithheld(t *testing.T) {
 		t.Fatalf("unexpected result: %v", err)
 	}
 }
+
+func TestRequestWithInheritedLimitBaselineIsWithheld(t *testing.T) {
+	target, output := oomResult()
+	result := &output.Results[1]
+	result.Evidence.CurrentRequest = analysis.Signal{Available: true, Unset: true}
+	result.Recommendations = []analysis.Recommendation{
+		{Setting: analysis.SettingRequests, CurrentUnset: true, SuggestedValue: 32 * 1024 * 1024},
+	}
+	if !UnsafeStandalone(*result) {
+		t.Fatal("a request with an inherited baseline should be withheld")
+	}
+	if _, err := Build("cluster", "", target, 1234, output, nil); err == nil || !strings.Contains(err.Error(), "baseline may be inherited") {
+		t.Fatalf("unexpected result: %v", err)
+	}
+}

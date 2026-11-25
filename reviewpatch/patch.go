@@ -312,6 +312,9 @@ func validateChange(change Change) error {
 	if change.After.Request != nil && change.After.Limit != nil && *change.After.Request > *change.After.Limit {
 		return errors.New("proposed request exceeds the resulting limit")
 	}
+	if change.Before.Request == nil && change.Before.Limit != nil && *change.Before.Limit > 0 && change.After.Request != nil {
+		return errors.New("the effective request baseline may be inherited from the existing limit")
+	}
 	return nil
 }
 
@@ -327,7 +330,9 @@ func UnsafeStandalone(result analysis.ResourceAnalysis) bool {
 		switch row.Setting {
 		case analysis.SettingRequests:
 			limit := result.Evidence.CurrentLimit
-			if limit.Available && !limit.Unset && suggested > snapQuantity(result.Resource, limit.Value) {
+			request := result.Evidence.CurrentRequest
+			if limit.Available && !limit.Unset &&
+				(suggested > snapQuantity(result.Resource, limit.Value) || request.Available && request.Unset && limit.Value > 0) {
 				return true
 			}
 		case analysis.SettingLimits:
