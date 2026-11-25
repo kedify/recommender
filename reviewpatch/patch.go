@@ -20,6 +20,9 @@ import (
 
 const SchemaVersion = "insights-resource-patch/v1"
 
+// StrategicMergePatch describes the Kubernetes patch format hashed in the artifact.
+const StrategicMergePatch = "application/strategic-merge-patch+json"
+
 var dnsLabel = regexp.MustCompile(`^[a-z0-9]([a-z0-9-]*[a-z0-9])?$`)
 
 type Document struct {
@@ -34,6 +37,7 @@ type Artifact struct {
 	Cluster             string          `json:"cluster"`
 	Shard               string          `json:"shard,omitempty"`
 	APIVersion          string          `json:"apiVersion"`
+	PatchType           string          `json:"patchType"`
 	Target              analysis.Target `json:"target"`
 	EvaluatedAt         int64           `json:"evaluatedAt"` // Unix milliseconds.
 	PolicyVersion       string          `json:"policyVersion"`
@@ -128,7 +132,7 @@ func Build(cluster, shard string, target analysis.Target, evaluatedAt int64, out
 	}
 
 	artifact := Artifact{
-		SchemaVersion: SchemaVersion, Cluster: cluster, Shard: shard, APIVersion: "apps/v1",
+		SchemaVersion: SchemaVersion, Cluster: cluster, Shard: shard, APIVersion: "apps/v1", PatchType: StrategicMergePatch,
 		Target: target, EvaluatedAt: evaluatedAt, PolicyVersion: out.PolicyVersion, DetectorVersion: out.DetectorVersion,
 	}
 	evidence := make([]analysis.ResourceAnalysis, 0, 2)
@@ -196,11 +200,11 @@ func buildChange(result analysis.ResourceAnalysis) (Change, error) {
 		identity.WorkloadUID != result.Target.WorkloadUID || identity.Release != result.Target.Release {
 		return Change{}, errors.New("current workload identity is unknown")
 	}
-	request, err := currentValue(result.Evidence.CurrentRequest)
+	request, err := currentValue(result.Resource, result.Evidence.CurrentRequest)
 	if err != nil {
 		return Change{}, err
 	}
-	limit, err := currentValue(result.Evidence.CurrentLimit)
+	limit, err := currentValue(result.Resource, result.Evidence.CurrentLimit)
 	if err != nil {
 		return Change{}, err
 	}
@@ -212,20 +216,20 @@ func buildChange(result analysis.ResourceAnalysis) (Change, error) {
 			return Change{}, errors.New("duplicate recommendation setting")
 		}
 		seen[row.Setting] = true
-		next := math.Ceil(row.SuggestedValue)
+		next := math.Ceil(snapQuantity(result.Resource, row.SuggestedValue))
 		if !representable(next) || next == 0 {
 			return Change{}, errors.New("suggested quantity is out of range")
 		}
 		value := int64(next)
 		switch row.Setting {
 		case analysis.SettingRequests:
-			if !matchesRecommendation(request, row) {
+			if !matchesRecommendation(result.Resource, request, row) {
 				return Change{}, errors.New("request recommendation baseline differs from evidence")
 			}
 			change.After.Request = &value
 			change.RequestWhy = reasons(result, row.Setting)
 		case analysis.SettingLimits:
-			if !matchesRecommendation(limit, row) {
+			if !matchesRecommendation(result.Resource, limit, row) {
 				return Change{}, errors.New("limit recommendation baseline differs from evidence")
 			}
 			change.After.Limit = &value
@@ -234,8 +238,8 @@ func buildChange(result analysis.ResourceAnalysis) (Change, error) {
 			return Change{}, errors.New("unsupported recommendation setting")
 		}
 	}
-	if change.After.Request != nil && change.After.Limit != nil && *change.After.Request > *change.After.Limit {
-		return Change{}, errors.New("proposed request exceeds the resulting limit")
+	if err := validateChange(change); err != nil {
+		return Change{}, err
 	}
 	return change, nil
 }
@@ -265,25 +269,50 @@ func representable(value float64) bool {
 	return value >= 0 && value < 1<<53 && math.Trunc(value) == value
 }
 
-func currentValue(signal analysis.Signal) (*int64, error) {
+func currentValue(resource analysis.Resource, signal analysis.Signal) (*int64, error) {
 	if !signal.Available {
 		return nil, errors.New("current request or limit is unknown")
 	}
 	if signal.Unset {
 		return nil, nil
 	}
-	if !representable(signal.Value) {
+	canonical := snapQuantity(resource, signal.Value)
+	if !representable(canonical) {
 		return nil, errors.New("current quantity is out of range")
 	}
-	value := int64(signal.Value)
+	value := int64(canonical)
 	return &value, nil
 }
 
-func matchesRecommendation(current *int64, row analysis.Recommendation) bool {
+func matchesRecommendation(resource analysis.Resource, current *int64, row analysis.Recommendation) bool {
 	if current == nil {
 		return row.CurrentUnset
 	}
-	return !row.CurrentUnset && float64(*current) == row.CurrentValue
+	return !row.CurrentUnset && float64(*current) == snapQuantity(resource, row.CurrentValue)
+}
+
+// CPU sources can multiply cores by 1000 and leave a few floating-point
+// ulps around an integral millicore value. Keep actual fractional values.
+func snapQuantity(kind analysis.Resource, value float64) float64 {
+	if kind != analysis.ResourceCPU || value < 0 || value >= 1<<53 {
+		return value
+	}
+	rounded := math.Round(value)
+	ulp := math.Nextafter(rounded, math.Inf(1)) - rounded
+	if math.Abs(value-rounded) <= min(4*ulp, 0.000001) {
+		return rounded
+	}
+	return value
+}
+
+func validateChange(change Change) error {
+	if change.After.Request == nil && !equal(change.Before.Limit, change.After.Limit) {
+		return errors.New("a limit change with an unset request would change Pod request defaulting")
+	}
+	if change.After.Request != nil && change.After.Limit != nil && *change.After.Limit > 0 && *change.After.Request > *change.After.Limit {
+		return errors.New("proposed request exceeds the resulting limit")
+	}
+	return nil
 }
 
 func equal(a, b *int64) bool {
@@ -294,16 +323,16 @@ func equal(a, b *int64) bool {
 // limit with the other setting left at its observed current value.
 func UnsafeStandalone(result analysis.ResourceAnalysis) bool {
 	for _, row := range result.Recommendations {
-		suggested := math.Ceil(row.SuggestedValue)
+		suggested := math.Ceil(snapQuantity(result.Resource, row.SuggestedValue))
 		switch row.Setting {
 		case analysis.SettingRequests:
 			limit := result.Evidence.CurrentLimit
-			if limit.Available && !limit.Unset && suggested > limit.Value {
+			if limit.Available && !limit.Unset && limit.Value > 0 && suggested > snapQuantity(result.Resource, limit.Value) {
 				return true
 			}
 		case analysis.SettingLimits:
 			request := result.Evidence.CurrentRequest
-			if request.Available && !request.Unset && suggested < request.Value {
+			if request.Available && (request.Unset || suggested < snapQuantity(result.Resource, request.Value)) {
 				return true
 			}
 		}
@@ -319,8 +348,8 @@ func renderPatch(artifact Artifact) (json.RawMessage, error) {
 			return nil, errors.New("unsupported or duplicate patch resource")
 		}
 		seen[change.Resource] = true
-		if change.After.Request != nil && change.After.Limit != nil && *change.After.Request > *change.After.Limit {
-			return nil, errors.New("proposed request exceeds the resulting limit")
+		if err := validateChange(change); err != nil {
+			return nil, err
 		}
 		for _, pair := range []struct {
 			key           string
@@ -355,7 +384,7 @@ func renderPatch(artifact Artifact) (json.RawMessage, error) {
 
 // Verify checks patch consistency and the stored digest. It does not authorize a change.
 func (d Document) Verify() error {
-	if d.Artifact.SchemaVersion != SchemaVersion || d.Artifact.APIVersion != "apps/v1" {
+	if d.Artifact.SchemaVersion != SchemaVersion || d.Artifact.APIVersion != "apps/v1" || d.Artifact.PatchType != StrategicMergePatch {
 		return errors.New("unsupported review patch schema")
 	}
 	if err := ValidateTarget(d.Artifact.Target); err != nil {
