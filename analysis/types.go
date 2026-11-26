@@ -182,6 +182,11 @@ type MemoryPolicy struct {
 	RequestsOnly          bool           `json:"requestsOnly"`
 	// Nil disables leak detection; an empty policy enables its defaults.
 	LeakDetection *MemoryLeakPolicy `json:"leakDetection,omitempty"`
+	// SafetyGuards opts into shared memory safety: OOM floors use only finite
+	// limits known at event time, and material reductions wait while the selected
+	// release shows ongoing, mature baseline growth. False keeps legacy behavior,
+	// policy JSON and policy versions unchanged.
+	SafetyGuards bool `json:"safetyGuards,omitempty"`
 }
 type Output struct {
 	Classifications []WorkloadClassification `json:"classifications,omitempty"`
@@ -226,7 +231,9 @@ type RolloutFallback struct {
 // OOMAdjustment records memory sizing before bounds and material-change guards.
 // The request candidate is max(BaselineRequestBytes, OOMRequestFloorBytes).
 // Events without a known failed limit use the current finite memory limit,
-// then the current request, then qualifying usage. The fallback flags identify
+// then the current request, then qualifying usage, unless memory safety guards
+// are enabled: then only known event-time limits contribute to the floor, and
+// unknown events remain evidence that blocks reductions. The fallback flags identify
 // which sources were used without presenting current settings as historical facts.
 // Presence does not promise an emitted recommendation: the remaining guards apply.
 type OOMAdjustment struct {

@@ -166,7 +166,10 @@ func Analyze(in Input, p Policy) (Output, error) {
 				return Output{}, fmt.Errorf("%s %s: %w", c.Target.Name, r, err)
 			}
 			if r == ResourceMemory && p.Memory.LeakDetection != nil {
-				result.MemoryLeak = analyzeMemoryLeak(in, c, p, result)
+				// Memory safety guards may already have evaluated this explicit policy.
+				if result.MemoryLeak == nil {
+					result.MemoryLeak = analyzeMemoryLeak(in, c, p, result)
+				}
 				if result.MemoryLeak.Status == MemoryLeakPotential {
 					result.Notices = append(result.Notices, ReasonPotentialMemoryLeak)
 				}
@@ -311,12 +314,19 @@ func analyzeResource(in Input, c ContainerObservation, r Resource, p Policy) (Re
 		return ResourceAnalysis{}, fmt.Errorf("suggested value overflow")
 	}
 	var adjustment *OOMAdjustment
-	if !identityBlocked && requestOK && len(result.Evidence.OOMKills) > 0 {
+	// With safety guards, only limits known at event time size the floor. Unknown
+	// events remain evidence and still block reductions and new finite limits,
+	// but never borrow a later/current allocation or usage as the failed limit.
+	sizingKills := result.Evidence.OOMKills
+	if r == ResourceMemory && p.Memory.SafetyGuards {
+		sizingKills = knownLimitOOMKills(sizingKills)
+	}
+	if !identityBlocked && requestOK && len(sizingKills) > 0 {
 		currentBase := obs.CurrentRequest.Value
 		if limitOK && obs.CurrentLimit.Value > 0 {
 			currentBase = obs.CurrentLimit.Value
 		}
-		value, oomErr := oomAdjustment(result.Evidence.OOMKills, rawSuggestedRequest, currentBase, p.Memory.OOMKilledCoefficient)
+		value, oomErr := oomAdjustment(sizingKills, rawSuggestedRequest, currentBase, p.Memory.OOMKilledCoefficient)
 		if oomErr != nil {
 			return ResourceAnalysis{}, oomErr
 		}
@@ -335,7 +345,7 @@ func analyzeResource(in Input, c ContainerObservation, r Resource, p Policy) (Re
 		requestTrace.step("usage × headroom", map[string]float64{"usage": usage.Value, "coefficient": headroom, "candidate": rawSuggestedRequest})
 	} else {
 		confidence = 0 // There is no qualifying usage history to score.
-		latest := result.Evidence.OOMKills[len(result.Evidence.OOMKills)-1]
+		latest := sizingKills[len(sizingKills)-1]
 		trace.Source = UsageSource{Release: c.Target.Release, PodUID: latest.PodUID, Timestamp: latest.Timestamp, Method: "OOM kill"}
 		requestTrace.step("OOM sizing without usage history", nil)
 	}
@@ -373,6 +383,8 @@ func analyzeResource(in Input, c ContainerObservation, r Resource, p Policy) (Re
 		}
 	}
 	downsizeSuppressed := false
+	memoryHoldReason := Reason("")
+	memoryGrowthEvaluated, memoryGrowthHeld := false, false
 	limitHoldReason := Reason("")
 	for _, s := range []struct {
 		setting      Setting
@@ -442,6 +454,38 @@ func analyzeResource(in Input, c ContainerObservation, r Resource, p Policy) (Re
 				continue
 			}
 		}
+		// Opt-in: hold a material memory reduction (request or limit), or the
+		// introduction of a finite limit where none was set, while the selected
+		// release shows ongoing, mature baseline growth: capping a growing
+		// container is as unsafe as shrinking it. Increases of an existing setting
+		// are never held. A held reduction keeps its current value, which is above
+		// its candidate, and a held introduction keeps the limit unset, so
+		// request <= limit is preserved. The detector runs at most once.
+		memoryReduction := !s.current.Unset && s.current.Value > 0 && s.suggested < s.current.Value
+		memoryLimitIntroduction := s.setting == SettingLimits && (s.current.Unset || s.current.Value == 0) && s.suggested > 0
+		if r == ResourceMemory && p.Memory.SafetyGuards && (memoryReduction || memoryLimitIntroduction) && isMaterial(s.current, s.suggested, bounds) {
+			if !memoryGrowthEvaluated {
+				memoryGrowthEvaluated = true
+				var leak *MemoryLeakAnalysis
+				memoryGrowthHeld, leak = memoryGrowthHold(in, c, p, result)
+				if p.Memory.LeakDetection != nil {
+					// Reused by Analyze for the explicit advisory display.
+					result.MemoryLeak = leak
+				}
+			}
+			// Only a hold is traced. Unavailable, immature, stale, inferred, or
+			// fallback evidence does not prove that growth is absent, so no passing
+			// guard is recorded for it.
+			if memoryGrowthHeld {
+				settingTrace.guard("no ongoing mature memory growth", false, nil)
+				settingTrace.stop("retained", ReasonMemoryBaselineGrowth)
+				result.Notices = appendUniqueReason(result.Notices, ReasonMemoryBaselineGrowth)
+				if memoryHoldReason == "" {
+					memoryHoldReason = ReasonMemoryBaselineGrowth
+				}
+				continue
+			}
+		}
 		// Do not propose a request above a known retained limit.
 		if s.setting == SettingRequests && limitOK && obs.CurrentLimit.Value > 0 {
 			settingTrace.guard("request fits retained or changing limit", s.suggested <= obs.CurrentLimit.Value || (!requestsOnly && isMaterial(obs.CurrentLimit, suggestedLimit, bounds)), map[string]float64{"candidate": s.suggested, "currentLimit": obs.CurrentLimit.Value})
@@ -486,6 +530,9 @@ func analyzeResource(in Input, c ContainerObservation, r Resource, p Policy) (Re
 		}
 		if result.NoActionReason == "" && limitHoldReason != "" {
 			result.NoActionReason = limitHoldReason
+		}
+		if result.NoActionReason == "" && memoryHoldReason != "" {
+			result.NoActionReason = memoryHoldReason
 		}
 		if result.NoActionReason == "" && boundsSuppressedAction {
 			result.NoActionReason = ReasonBounds

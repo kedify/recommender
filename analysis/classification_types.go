@@ -78,6 +78,11 @@ type CPUThrottlingObservation struct {
 	Seconds          []Series `json:"seconds,omitempty"`
 	ThrottledPeriods []Series `json:"throttledPeriods,omitempty"`
 	Periods          []Series `json:"periods,omitempty"`
+	// SourceComplete is set by the adapter only when it saw no failed or partial
+	// CFS collection and can identify raw CFS runtime lifetimes. It is a
+	// precondition for strict coverage, never proof of coverage or of zero
+	// throttling.
+	SourceComplete bool `json:"sourceComplete,omitempty"`
 }
 type WorkloadClassification struct {
 	DetectorVersion string            `json:"detectorVersion"`
