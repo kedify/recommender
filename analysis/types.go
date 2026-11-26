@@ -162,6 +162,10 @@ type Bounds struct {
 	MinimumRelativeChange float64 `json:"minimumRelativeChange"`
 }
 type CPUPolicy struct {
+	// Nil disables the CPU limit reduction guard, so omitted or older policies
+	// keep their policy version and results.
+	LimitReductionGuard *CPULimitReductionGuardPolicy `json:"limitReductionGuard,omitempty"`
+
 	Strategy              CPUStrategy `json:"strategy"`
 	Percentile            float64     `json:"percentile,omitempty"`
 	HeadroomCoefficient   float64     `json:"headroomCoefficient"`

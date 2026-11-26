@@ -34,6 +34,8 @@ const (
 // ClassificationObservation contains optional, adapter-attributed evidence.
 // OOMKills here are classification-only and cannot affect sizing. Throttling
 // series hold raw cumulative counters with Kind=SampleGauge, never CPU usage.
+// Only an explicit Policy.CPU.LimitReductionGuard may use verified positive
+// same-release throttling to hold a CPU limit reduction; it never sizes values.
 type ClassificationObservation struct {
 	LeasesAvailable bool                     `json:"leasesAvailable,omitempty"`
 	Leases          []LeaseObservation       `json:"leases,omitempty"`

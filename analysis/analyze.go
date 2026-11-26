@@ -101,6 +101,13 @@ func NormalizePolicy(p Policy) (Policy, error) {
 	if e.MinimumHistorySeconds < 1 || e.MinimumSamples < 2 || !positive(e.MinimumCoverage) || e.MinimumCoverage > 1 || e.FreshnessSeconds < 1 {
 		return Policy{}, fmt.Errorf("invalid evidence policy")
 	}
+	if p.CPU.LimitReductionGuard != nil {
+		guard, err := normalizeCPULimitReductionGuard(*p.CPU.LimitReductionGuard)
+		if err != nil {
+			return Policy{}, err
+		}
+		p.CPU.LimitReductionGuard = &guard
+	}
 	if p.Memory.LeakDetection != nil {
 		leak, err := normalizeMemoryLeakPolicy(*p.Memory.LeakDetection)
 		if err != nil {
@@ -366,6 +373,7 @@ func analyzeResource(in Input, c ContainerObservation, r Resource, p Policy) (Re
 		}
 	}
 	downsizeSuppressed := false
+	limitHoldReason := Reason("")
 	for _, s := range []struct {
 		setting      Setting
 		current      Signal
@@ -418,6 +426,22 @@ func analyzeResource(in Input, c ContainerObservation, r Resource, p Policy) (Re
 			downsizeSuppressed = downsizeSuppressed || isMaterial(s.current, s.suggested, bounds)
 			continue
 		}
+		// Opt-in: hold only the final material reduction of a known finite CPU
+		// limit. Absent or untrustworthy counters never block and never prove zero.
+		// A held reduction keeps the current limit, which is above the suggested
+		// limit and therefore above any request recommended by this pass.
+		if r == ResourceCPU && s.setting == SettingLimits && p.CPU.LimitReductionGuard != nil && !s.current.Unset && s.current.Value > 0 && s.suggested < s.current.Value && isMaterial(s.current, s.suggested, bounds) {
+			if held := cpuLimitReductionHold(in, c, obs, headroom, *p.CPU.LimitReductionGuard, float64(p.Evidence.FreshnessSeconds), s.suggested, settingTrace); len(held) > 0 {
+				settingTrace.stop("retained", held...)
+				for _, reason := range held {
+					result.Notices = appendNotice(result.Notices, reason)
+				}
+				if limitHoldReason == "" {
+					limitHoldReason = held[0]
+				}
+				continue
+			}
+		}
 		// Do not propose a request above a known retained limit.
 		if s.setting == SettingRequests && limitOK && obs.CurrentLimit.Value > 0 {
 			settingTrace.guard("request fits retained or changing limit", s.suggested <= obs.CurrentLimit.Value || (!requestsOnly && isMaterial(obs.CurrentLimit, suggestedLimit, bounds)), map[string]float64{"candidate": s.suggested, "currentLimit": obs.CurrentLimit.Value})
@@ -459,6 +483,9 @@ func analyzeResource(in Input, c ContainerObservation, r Resource, p Policy) (Re
 					break
 				}
 			}
+		}
+		if result.NoActionReason == "" && limitHoldReason != "" {
+			result.NoActionReason = limitHoldReason
 		}
 		if result.NoActionReason == "" && boundsSuppressedAction {
 			result.NoActionReason = ReasonBounds
