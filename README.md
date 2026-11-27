@@ -131,7 +131,9 @@ With memory safety enabled, a shorter current rollout's observed peak floors a
 historical estimate. An incomplete OOM collection holds memory reductions and
 new limits. A verified current Pod's earlier OOM can predate a collector's first
 observation. A recorded activation or intervening rollout still excludes old
-events.
+events. After an inventory gap, `identity.usageStart` bounds usage, quota proof,
+historical fallback, and growth. A verified current Pod can attest an earlier
+OOM without reviving pre-gap usage or OOM events from retired Pods.
 
 Saved patch reviews mark the four connected read-only checks as unperformed:
 Deployment target, revision, current resources, and freshness. Write permission,

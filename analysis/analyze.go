@@ -150,6 +150,9 @@ func Analyze(in Input, p Policy) (Output, error) {
 		if c.Target.Namespace == "" || c.Target.Kind == "" || c.Target.Name == "" || c.Target.Container == "" {
 			return Output{}, fmt.Errorf("containers[%d]: target namespace, kind, name, and container are required", i)
 		}
+		if c.Identity.UsageStart < 0 || c.Identity.UsageStart > in.EvaluationTime || c.OOMCoverageStart < 0 || c.OOMCoverageStart > in.EvaluationTime {
+			return Output{}, fmt.Errorf("containers[%d]: invalid coverage start", i)
+		}
 		if c.Inventory.Eligible < 0 || c.Inventory.Observed < 0 || c.Inventory.Excluded < 0 {
 			return Output{}, fmt.Errorf("containers[%d]: negative inventory count", i)
 		}
@@ -165,16 +168,21 @@ func Analyze(in Input, p Policy) (Output, error) {
 			// use the same event. Event selection reconciles repeated snapshots.
 			c.OOMKills = slices.Concat(c.OOMKills, c.Classification.OOMKills)
 		}
-		c = selectReleaseSegment(in, c, p.Memory.SafetyGuards || p.CPU.LimitReductionGuard != nil && p.CPU.LimitReductionGuard.RequireCompleteCoverage)
+		c, err = selectEvidence(in, c, p.Memory.SafetyGuards || p.CPU.LimitReductionGuard != nil && p.CPU.LimitReductionGuard.RequireCompleteCoverage)
+		if err != nil {
+			return Output{}, fmt.Errorf("%s OOM evidence: %w", original.Target.Name, err)
+		}
+		usageIn := in
+		usageIn.WindowStart = max(in.WindowStart, c.Identity.UsageStart)
 		for _, r := range []Resource{ResourceMemory, ResourceCPU} {
-			result, err := analyzeResource(in, c, r, p)
+			result, err := analyzeResource(usageIn, c, r, p)
 			if err != nil {
 				return Output{}, fmt.Errorf("%s %s: %w", c.Target.Name, r, err)
 			}
 			if r == ResourceMemory && p.Memory.LeakDetection != nil {
 				// Memory safety guards may already have evaluated this explicit policy.
 				if result.MemoryLeak == nil {
-					result.MemoryLeak = analyzeMemoryLeak(in, c, p, result)
+					result.MemoryLeak = analyzeMemoryLeak(usageIn, c, p, result)
 				}
 				if result.MemoryLeak.Status == MemoryLeakPotential {
 					result.Notices = append(result.Notices, ReasonPotentialMemoryLeak)
@@ -185,9 +193,15 @@ func Analyze(in Input, p Policy) (Output, error) {
 		if p.Classification != nil {
 			if !p.Memory.SafetyGuards {
 				// Legacy classification selects its own segment from its broader inputs.
-				c = original
+				if original.Classification != nil {
+					original.OOMKills = slices.Concat(original.OOMKills, original.Classification.OOMKills)
+				}
+				c, err = selectEvidence(in, original, true)
+				if err != nil {
+					return Output{}, fmt.Errorf("%s classification: %w", original.Target.Name, err)
+				}
 			}
-			finding, err := classifyWorkload(in, c, p)
+			finding, err := classifyWorkload(usageIn, c, p)
 			if err != nil {
 				return Output{}, fmt.Errorf("%s classification: %w", c.Target.Name, err)
 			}
@@ -226,6 +240,7 @@ func analyzeResource(in Input, c ContainerObservation, r Resource, p Policy) (Re
 	requestTrace, limitTrace := &trace.Settings[0], &trace.Settings[1]
 	q := &result.DataQuality
 	identity := c.Identity
+	settingsStart := max(identity.ReleaseStartedAt, identity.UsageStart)
 	switch {
 	case identity.Ambiguous:
 		addReason(q, ReasonAmbiguousIdentity)
@@ -233,7 +248,7 @@ func analyzeResource(in Input, c ContainerObservation, r Resource, p Policy) (Re
 		addReason(q, ReasonMissingIdentity)
 	case identity.WorkloadUID != c.Target.WorkloadUID || identity.Release != c.Target.Release:
 		addReason(q, ReasonAmbiguousIdentity)
-	case stale(identity.Timestamp, in, p.Evidence) || identity.Timestamp < identity.ReleaseStartedAt:
+	case stale(identity.Timestamp, in, p.Evidence) || identity.Timestamp < settingsStart:
 		addReason(q, ReasonStaleIdentity)
 	}
 	if identity.ReleaseStartedAt <= 0 || identity.ReleaseStartedAt > in.EvaluationTime {
@@ -277,10 +292,7 @@ func analyzeResource(in Input, c ContainerObservation, r Resource, p Policy) (Re
 	usageBlocked := len(q.Reasons) > 0
 	oomLimitUnknown := false
 	if r == ResourceMemory {
-		kills, oomErr := selectOOMKills(in, c)
-		if oomErr != nil {
-			return ResourceAnalysis{}, oomErr
-		}
+		kills := c.OOMKills
 		result.Evidence.OOMKills = kills
 		if len(kills) > 0 {
 			result.Notices = append(result.Notices, ReasonOOMKillDetected)
@@ -306,7 +318,7 @@ func analyzeResource(in Input, c ContainerObservation, r Resource, p Policy) (Re
 		if !s.value.Available {
 			addReason(q, s.missing)
 			*s.ok = false
-		} else if stale(s.value.Timestamp, in, p.Evidence) || s.value.Timestamp < identity.ReleaseStartedAt {
+		} else if stale(s.value.Timestamp, in, p.Evidence) || s.value.Timestamp < settingsStart {
 			addReason(q, s.old)
 			*s.ok = false
 		}
@@ -319,7 +331,7 @@ func analyzeResource(in Input, c ContainerObservation, r Resource, p Policy) (Re
 	case !c.Inventory.Available:
 		addReason(q, ReasonUnknownInventory)
 		inventoryOK = false
-	case stale(c.Inventory.Timestamp, in, p.Evidence) || c.Inventory.Timestamp < identity.ReleaseStartedAt:
+	case stale(c.Inventory.Timestamp, in, p.Evidence) || c.Inventory.Timestamp < settingsStart:
 		addReason(q, ReasonStaleInventory)
 		inventoryOK = false
 	case c.Inventory.Excluded > 0:
@@ -785,10 +797,10 @@ func normalizeUsage(in Input, c ContainerObservation, obs ResourceObservation, r
 
 // selectReleaseSegment derives a conservative observed segment boundary when
 // the source has no activation event. Seeing B between two A runs excludes old A.
-func selectReleaseSegment(in Input, c ContainerObservation, reliability bool) ContainerObservation {
+func selectReleaseSegment(in Input, c ContainerObservation, reliability bool) (ContainerObservation, int64) {
 	if c.Identity.RolloutBoundaryVerified && c.Identity.ReleaseStartedAt > 0 {
 		// Other releases can still be serving Pods after the verified activation.
-		return c
+		return c, c.Identity.ReleaseStartedAt
 	}
 	cutoff := in.WindowStart - 1
 	rows := [][]Series{c.CPU.Series, c.Memory.Series}
@@ -827,14 +839,7 @@ func selectReleaseSegment(in Input, c ContainerObservation, reliability bool) Co
 		if kill.WorkloadUID == c.Target.WorkloadUID && kill.Release == c.Target.Release && kill.Timestamp > cutoff && kill.Timestamp <= in.EvaluationTime && (boundary == 0 || kill.Timestamp < boundary) {
 			boundary = kill.Timestamp
 		}
-		// First collection is not an activation. A current Pod can attest to its
-		// own earlier event, but never across a known activation or rollback.
-		_, current := c.Inventory.CurrentPods[kill.PodUID]
-		if current && kill.PodUID != "" && c.Identity.ReleaseStartInferred && !c.Identity.RolloutBoundaryVerified &&
-			kill.WorkloadUID == c.Target.WorkloadUID && kill.Release == c.Target.Release &&
-			kill.Timestamp > cutoff && kill.Timestamp < c.Identity.ReleaseStartedAt {
-			c.Identity.ReleaseStartedAt = kill.Timestamp
-		}
+
 	}
 	if boundary == 0 && cutoff >= in.WindowStart {
 		boundary = cutoff + 1
@@ -847,5 +852,10 @@ func selectReleaseSegment(in Input, c ContainerObservation, reliability bool) Co
 		c.Identity.ReleaseStartedAt = boundary
 		c.Identity.ReleaseStartInferred = true
 	}
-	return c
+	// First collection cannot exclude a known current Pod's earlier event.
+	// Only a recorded activation or an intervening revision fences that event.
+	if c.Identity.ReleaseStartInferred && !c.Identity.RolloutBoundaryVerified {
+		return c, cutoff + 1
+	}
+	return c, c.Identity.ReleaseStartedAt
 }

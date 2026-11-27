@@ -318,3 +318,52 @@ func TestQuotaResizeRetainsWholeRuntimeClassification(t *testing.T) {
 		}
 	}
 }
+
+func TestInventoryGapKeepsCurrentPodEventsWithoutRestoringPreGapUsage(t *testing.T) {
+	in := fixture(7200, 60)
+	in.WindowStart -= 3 * 3600_000
+	c := &in.Containers[0]
+	c.PreviousReleases = []PreviousRelease{previousFixture("previous", epoch-60_000, 7200, 60)}
+	c.Identity.ReleaseStartInferred = true
+	c.Identity.ReleaseStartedAt = epoch + 60*60000
+	c.Identity.UsageStart = in.EvaluationTime - 3*60000
+	c.Inventory.CurrentPods = map[string]int64{"pod-1": epoch + 75*60000}
+	c.Classification = &ClassificationObservation{Throttling: CPUThrottlingObservation{Periods: []Series{guardCounter("intervening", "B", epoch+50*60000, []float64{1})}}}
+	beforeB := oomKill("before-B", epoch+30*60000, 512*mib)
+	early := oomKill("after-B", epoch+55*60000, 512*mib)
+	retired := oomKill("retired", epoch+70*60000, 1024*mib)
+	retired.PodUID = "retired"
+	c.OOMKills = []OOMKill{retired, early, beforeB}
+	p := safetyPolicy(DefaultPolicy())
+	p.Classification = &ClassificationPolicy{}
+	out := run(t, in, p)
+	mem, cpu := out.Results[0], out.Results[1]
+	if !slices.Equal(mem.Evidence.OOMKills, []OOMKill{early}) || mem.OOMAdjustment == nil || mem.OOMAdjustment.OOMRequestFloorBytes != 768*mib || mem.Evidence.Identity.ReleaseStartedAt != c.Identity.ReleaseStartedAt {
+		t.Fatalf("gap changed event attribution or release identity: %+v", mem)
+	}
+	if mem.RolloutFallback != nil || cpu.RolloutFallback != nil || len(cpu.Recommendations) != 0 || cpu.DataQuality.ObservedStart < c.Identity.UsageStart {
+		t.Fatalf("an early OOM reopened pre-gap usage or fallback: %+v %+v", cpu, mem)
+	}
+	if class := out.Classifications[0]; class.WindowStart > early.Timestamp || !slices.Equal(finding(class, FeatureOOMKilled).OOMKills, []OOMKill{early}) {
+		t.Fatalf("classification disagrees about an observed early OOM: %+v", class)
+	}
+}
+
+func TestOOMCoverageStartFollowsCFSOnlyRollback(t *testing.T) {
+	in := fixture(7200, 60)
+	c := &in.Containers[0]
+	c.Identity.ReleaseStartInferred = true
+	c.Classification = &ClassificationObservation{Throttling: CPUThrottlingObservation{Periods: []Series{guardCounter("intervening", "B", epoch+10*60000, []float64{1})}}}
+	p := safetyPolicy(shortPolicy())
+	for _, tc := range []struct {
+		since int64
+		held  bool
+	}{{10, false}, {20, true}} {
+		c.OOMCoverageStart = epoch + tc.since*60000
+		out := run(t, in, p)
+		mem := out.Results[0]
+		if has(mem.DataQuality, ReasonOOMCoverageIncomplete) != tc.held || (len(mem.Recommendations) == 0) != tc.held || len(out.Results[1].Recommendations) == 0 {
+			t.Fatalf("coverage at %d, held=%v: %+v", tc.since, tc.held, mem)
+		}
+	}
+}

@@ -15,15 +15,11 @@ func classifyWorkload(in Input, c ContainerObservation, p Policy) (WorkloadClass
 	if c.Classification != nil {
 		obs = *c.Classification
 	}
-	if !p.Memory.SafetyGuards {
-		c.OOMKills = slices.Concat(c.OOMKills, obs.OOMKills)
-		c = selectReleaseSegment(in, c, true)
-	}
 	c.PreviousReleases = nil
 	start := max(in.WindowStart, c.Identity.ReleaseStartedAt)
 	out := WorkloadClassification{DetectorVersion: ClassificationDetectorVersion, Target: c.Target, WindowStart: start, WindowEnd: in.EvaluationTime, Features: []WorkloadFeature{}, Issues: append([]string(nil), obs.Issues...)}
 	features := []WorkloadFeature{FeatureLeaderElection, FeatureHighVarianceCPU, FeatureHighVarianceMemory, FeatureOOMKilled, FeatureMemoryLeak, FeatureCPUThrottled, FeatureHTTPTraffic, FeatureMetrics}
-	validIdentity := c.Identity.Available && !c.Identity.Ambiguous && c.Identity.WorkloadUID != "" && c.Identity.WorkloadUID == c.Target.WorkloadUID && c.Identity.Release != "" && c.Identity.Release == c.Target.Release && !stale(c.Identity.Timestamp, in, p.Evidence) && c.Identity.ReleaseStartedAt >= 0 && c.Identity.ReleaseStartedAt <= c.Identity.Timestamp
+	validIdentity := c.Identity.Available && !c.Identity.Ambiguous && c.Identity.WorkloadUID != "" && c.Identity.WorkloadUID == c.Target.WorkloadUID && c.Identity.Release != "" && c.Identity.Release == c.Target.Release && !stale(c.Identity.Timestamp, in, p.Evidence) && c.Identity.ReleaseStartedAt >= 0 && max(c.Identity.ReleaseStartedAt, c.Identity.UsageStart) <= c.Identity.Timestamp
 	for _, feature := range features {
 		f := FeatureFinding{Feature: feature, Status: ClassificationInsufficient}
 		metadataFeature := feature == FeatureLeaderElection || feature == FeatureHTTPTraffic || feature == FeatureMetrics
@@ -60,13 +56,11 @@ func classifyWorkload(in Input, c ContainerObservation, p Policy) (WorkloadClass
 				return out, err
 			}
 		case FeatureOOMKilled:
-			kills, err := selectOOMKills(in, c)
-			if err != nil {
-				return out, err
-			}
+			kills := c.OOMKills
 			f.OOMKills = kills
 			// No supplied events is absence of evidence, not proof of no OOMs.
 			if len(kills) > 0 {
+				out.WindowStart = min(out.WindowStart, kills[0].Timestamp)
 				f.Status = ClassificationDetected
 			} else {
 				f.Reasons = []string{"no-supplied-oom-events"}
@@ -90,10 +84,7 @@ func classifyWorkload(in Input, c ContainerObservation, p Policy) (WorkloadClass
 			if err != nil {
 				return out, err
 			}
-			resource.Evidence.OOMKills, err = selectOOMKills(in, c)
-			if err != nil {
-				return out, err
-			}
+			resource.Evidence.OOMKills = c.OOMKills
 			f.MemoryLeak = analyzeMemoryLeak(in, c, lp, resource)
 			switch f.MemoryLeak.Status {
 			case MemoryLeakPotential:

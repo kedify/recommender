@@ -121,6 +121,19 @@ func validLabel(value string) bool {
 // Build exports one regular container. The caller supplies holds established by
 // its source, such as a utilization autoscaler affecting the targeted resource.
 func Build(cluster, shard string, target analysis.Target, evaluatedAt int64, out *analysis.Output, holds map[analysis.Resource]string) (Document, error) {
+	return build(cluster, shard, target, evaluatedAt, out, holds, "")
+}
+
+// BuildForResource reviews the selected recommendation's request and limit as
+// a pair. The digest still covers both resources' original target evidence.
+func BuildForResource(cluster, shard string, target analysis.Target, evaluatedAt int64, out *analysis.Output, holds map[analysis.Resource]string, selected analysis.Resource) (Document, error) {
+	if selected != analysis.ResourceCPU && selected != analysis.ResourceMemory {
+		return Document{}, errors.New("select cpu or memory for resource review")
+	}
+	return build(cluster, shard, target, evaluatedAt, out, holds, selected)
+}
+
+func build(cluster, shard string, target analysis.Target, evaluatedAt int64, out *analysis.Output, holds map[analysis.Resource]string, selected analysis.Resource) (Document, error) {
 	if err := ValidateTarget(target); err != nil {
 		return Document{}, err
 	}
@@ -156,6 +169,9 @@ func Build(cluster, shard string, target analysis.Target, evaluatedAt int64, out
 		}
 		if !result.Evidence.CurrentRequest.Available || !result.Evidence.CurrentLimit.Available {
 			artifact.Holds = append(artifact.Holds, Hold{Resource: resource, Reason: "current request or limit is unknown"})
+			continue
+		}
+		if selected != "" && resource != selected {
 			continue
 		}
 		change, err := buildChange(*result)

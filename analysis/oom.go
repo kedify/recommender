@@ -10,10 +10,20 @@ import (
 	"sort"
 )
 
+// Select real terminations once per segment, before narrowing the usage window.
+func selectEvidence(in Input, c ContainerObservation, reliability bool) (ContainerObservation, error) {
+	c, currentPodStart := selectReleaseSegment(in, c, reliability)
+	if c.OOMCoverageStart > max(in.WindowStart, c.Identity.ReleaseStartedAt) {
+		c.OOMCoverageIncomplete = true
+	}
+	kills, err := selectOOMKills(in, c, currentPodStart)
+	c.OOMKills = kills
+	return c, err
+}
+
 // Select by event time, not observation freshness: a historical kill remains
 // relevant throughout the selected release segment, even after its pod is gone.
-func selectOOMKills(in Input, c ContainerObservation) ([]OOMKill, error) {
-	start := max(in.WindowStart, c.Identity.ReleaseStartedAt)
+func selectOOMKills(in Input, c ContainerObservation, currentPodStart int64) ([]OOMKill, error) {
 	var kills []OOMKill
 	seen := make(map[string]OOMKill)
 	for _, kill := range c.OOMKills {
@@ -47,6 +57,10 @@ func selectOOMKills(in Input, c ContainerObservation) ([]OOMKill, error) {
 	for _, kill := range seen {
 		// Validate every supplied observation, including conflicts across the
 		// selection boundary, before deciding whether it affects this analysis.
+		start := max(in.WindowStart, c.Identity.ReleaseStartedAt, c.Identity.UsageStart)
+		if _, member := c.Inventory.CurrentPods[kill.PodUID]; member && kill.PodUID != "" {
+			start = max(in.WindowStart, currentPodStart)
+		}
 		if kill.Timestamp < start || kill.Timestamp > in.EvaluationTime || kill.WorkloadUID != c.Target.WorkloadUID || kill.Release != c.Target.Release {
 			continue
 		}

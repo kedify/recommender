@@ -197,3 +197,28 @@ func TestOfflineChecksMatchConnectedReview(t *testing.T) {
 		t.Fatalf("offline review checks = %+v, want %+v", got, want)
 	}
 }
+
+func TestSelectedResourceKeepsOriginalEvidenceAndPair(t *testing.T) {
+	target, out := oomResult()
+	cpu := &out.Results[0]
+	cpu.Evidence = out.Results[1].Evidence
+	cpu.Evidence.CurrentRequest.Value = 500
+	cpu.Evidence.CurrentLimit.Value = 1000
+	cpu.Recommendations = []analysis.Recommendation{{Setting: analysis.SettingRequests, CurrentValue: 500, SuggestedValue: 100}}
+	both, err := Build("cluster", "", target, 1234, out, nil)
+	if err != nil || len(both.Artifact.Changes) != 2 {
+		t.Fatalf("full review: %+v %v", both, err)
+	}
+	mem, err := BuildForResource("cluster", "", target, 1234, out, nil, analysis.ResourceMemory)
+	if err != nil || mem.Verify() != nil || len(mem.Artifact.Changes) != 1 || mem.Artifact.Changes[0].Resource != analysis.ResourceMemory || mem.Artifact.EvidenceFingerprint != both.Artifact.EvidenceFingerprint {
+		t.Fatalf("selected review: %+v %v", mem, err)
+	}
+	cpu.Evidence.CurrentLimit.Available = false
+	mem, err = BuildForResource("cluster", "", target, 1234, out, nil, analysis.ResourceMemory)
+	if err != nil || len(mem.Artifact.Holds) != 1 || mem.Artifact.Holds[0].Resource != analysis.ResourceCPU {
+		t.Fatalf("lost sibling hold: %+v %v", mem, err)
+	}
+	if _, err := BuildForResource("cluster", "", target, 1234, out, nil, analysis.ResourceCPU); err == nil {
+		t.Fatal("held CPU selection exported a sibling memory change")
+	}
+}

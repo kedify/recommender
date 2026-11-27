@@ -38,6 +38,9 @@ type ContainerObservation struct {
 	OOMKills       []OOMKill                  `json:"oomKills,omitempty"`
 	// Failed or incomplete collection prevents decreases and new finite memory limits.
 	OOMCoverageIncomplete bool `json:"oomCoverageIncomplete,omitempty"`
+	// First instant of complete, uninterrupted OOM observation, in Unix ms.
+	// Earlier gaps only affect the selected rollout if they overlap its window.
+	OOMCoverageStart int64 `json:"oomCoverageStart,omitempty"`
 	// Newest first. Only the first three entries are eligible as fallback usage.
 	PreviousReleases []PreviousRelease `json:"previousReleases,omitempty"`
 }
@@ -84,6 +87,9 @@ type CurrentIdentity struct {
 	ReleaseStartInferred bool   `json:"releaseStartInferred"`
 	// A recorded activation or intervening release fences events from a prior activation.
 	RolloutBoundaryVerified bool `json:"rolloutBoundaryVerified,omitempty"`
+	// First trustworthy usage observation after a collection gap, in Unix ms.
+	// A verified OOM on a current Pod can predate this coverage boundary.
+	UsageStart int64 `json:"usageStart,omitempty"`
 }
 
 // Counts refer to the selected UID/release/container. Observed is a distinct
