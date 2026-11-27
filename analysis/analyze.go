@@ -785,11 +785,6 @@ func selectReleaseSegment(in Input, c ContainerObservation, reliability bool) Co
 			}
 		}
 	}
-	for _, kill := range c.OOMKills {
-		if reliability && kill.WorkloadUID == c.Target.WorkloadUID && kill.Release != "" && kill.Release != c.Target.Release && kill.Timestamp <= in.EvaluationTime {
-			cutoff = max(cutoff, kill.Timestamp)
-		}
-	}
 	boundary := int64(0)
 	for _, series := range rows {
 		for _, s := range series {

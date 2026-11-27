@@ -178,3 +178,17 @@ func TestRecurringDemandOutlivesCounterCollectionAndProtectsNewCaps(t *testing.T
 		t.Fatalf("healthy introduction incorrectly required CFS: %+v", r)
 	}
 }
+
+func TestConcurrentPreviousReleaseOOMCannotFenceCurrentUsage(t *testing.T) {
+	in := fixture(7200, 60)
+	p := safetyPolicy(DefaultPolicy())
+	before := run(t, in, p)
+	old := oomKill("old", in.EvaluationTime-60_000, 512*mib)
+	old.PodUID, old.Release = "old-pod", "old"
+	in.Containers[0].OOMKills = []OOMKill{old}
+	after := run(t, in, p)
+	if !slices.Equal(before.Results[0].Recommendations, after.Results[0].Recommendations) ||
+		before.Results[0].Evidence.Identity.ReleaseStartedAt != after.Results[0].Evidence.Identity.ReleaseStartedAt {
+		t.Fatal("historical event moved an active rollout's boundary")
+	}
+}
