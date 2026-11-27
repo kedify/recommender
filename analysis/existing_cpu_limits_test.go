@@ -272,6 +272,44 @@ func TestUsageAfterTheCertifiedCFSSnapshotCannotFillAGap(t *testing.T) {
 	}
 }
 
+func TestCounterUsageMustOverlapCertifiedCFS(t *testing.T) {
+	for _, tc := range []struct {
+		name        string
+		last        int
+		reset, want bool
+	}{
+		{"ends exactly where CFS starts", 94, false, false},
+		{"only overlapping interval crosses a reset", 95, true, false},
+		{"one valid overlapping rate", 95, false, true},
+		{"valid rate after reset", 96, true, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			in, p := existingLimitFixture(false)
+			c := &in.Containers[0]
+			c.CPU.CurrentLimit.Value = 1000
+			totals := &c.Classification.Throttling
+			totals.CoverageAt = in.EvaluationTime - 4*60000
+			for _, family := range [][]Series{totals.Periods, totals.ThrottledPeriods, totals.Seconds} {
+				family[0].Samples = family[0].Samples[:97]
+			}
+			usage := &c.CPU.Series[0]
+			usage.Kind = SampleCPUCounterSeconds
+			for i := range usage.Samples {
+				usage.Samples[i].Value = float64(i) * 6
+				if tc.reset && i >= 95 {
+					usage.Samples[i].Value = float64(i-95) * 6
+				}
+			}
+			usage.Samples = slices.Delete(usage.Samples, tc.last+1, 97)
+			cpu := run(t, in, p).Results[1]
+			rec, issued := guardRecommendation(cpu, SettingLimits)
+			if issued != tc.want || !issued && !slices.Contains(guardSettingTrace(cpu, SettingLimits).Reasons, ReasonCPULimitEvidenceIncomplete) {
+				t.Fatalf("limit %+v, trace %+v", rec, guardSettingTrace(cpu, SettingLimits))
+			}
+		})
+	}
+}
+
 func TestExistingLimitsCannotEnableLegacyFullLimitSizing(t *testing.T) {
 	in, p := existingLimitFixture(true)
 	p.CPU.RequestsOnly = false

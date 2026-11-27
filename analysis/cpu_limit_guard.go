@@ -557,18 +557,16 @@ func cpuThrottlingCoverage(in Input, c ContainerObservation, obs ResourceObserva
 // CFS proof, allowing independent collection timestamps. A counter-derived
 // rate needs two distinct readings under the current quota.
 func usageInCFSSpan(series Series, quotaStart int64, span cpuCoverageSpanTotals) bool {
-	var first, last int64
-	for _, sample := range series.Samples {
-		ts := sample.Timestamp
-		if ts < quotaStart || ts > span.end {
-			continue
-		}
-		if first == 0 || ts < first {
-			first = ts
-		}
-		last = max(last, ts)
+	if series.Kind == SampleGauge {
+		return slices.ContainsFunc(series.Samples, func(sample Sample) bool {
+			return sample.Timestamp >= span.start && sample.Timestamp <= span.end
+		})
 	}
-	return last >= span.start && (series.Kind == SampleGauge || first < last)
+	// Work from raw CPU seconds. CounterIntervals drops resets and cadence
+	// gaps. A rate ending exactly at the start covers only the prior span.
+	series.Kind = SampleGauge
+	intervals, err := CounterIntervals(series, quotaStart, span.end)
+	return err == nil && len(intervals) != 0 && intervals[len(intervals)-1].End > span.start
 }
 
 // cpuCoverageSpan requires the latest periods interval to be fresh and the
