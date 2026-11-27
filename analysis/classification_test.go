@@ -300,6 +300,16 @@ func TestThrottlingAfterFastStartupScrapes(t *testing.T) {
 	if e.ObservedIntervals != 9 || e.ObservedSeconds != 102 || e.ThrottledSeconds == nil || *e.ThrottledSeconds != 14 || e.ThrottledPeriods == nil || *e.ThrottledPeriods != 556 {
 		t.Fatalf("expected seven fast and two corroborated periodic intervals: %+v", e)
 	}
+	baseline := run(t, fixture(3600, 20), guardTestPolicy()).Results[1]
+	if _, ok := guardRecommendation(baseline, SettingLimits); !ok {
+		t.Fatal("control must have an eligible limit cut")
+	}
+	cpu := run(t, in, guardTestPolicy()).Results[1]
+	request, ok := guardRecommendation(cpu, SettingRequests)
+	wantRequest, _ := guardRecommendation(baseline, SettingRequests)
+	if !ok || request != wantRequest || !guardHasReason(cpu.Notices, ReasonCPUThrottlingPressure) {
+		t.Fatalf("mixed-cadence pressure must retain the cap independently of requests: %+v", cpu.Notices)
+	}
 	// A missing scrape window after the transition cannot certify new deltas.
 	in.EvaluationTime += 150000
 	add(150, 1500, 1000, 50)
@@ -310,5 +320,20 @@ func TestThrottlingAfterFastStartupScrapes(t *testing.T) {
 	strict, err := CounterIntervals(seconds, in.WindowStart, in.EvaluationTime)
 	if err != nil || len(strict) != 7 {
 		t.Fatalf("slower-cadence observations certified a limit cut: %+v %v", strict, err)
+	}
+}
+
+func TestPressureDoesNotBridgeRepeatedOutages(t *testing.T) {
+	in := fixture(7200, 60)
+	counter := counterFixture(in, nil)
+	at := in.WindowStart
+	counter.Samples = append(counter.Samples, Sample{Timestamp: at})
+	for _, delay := range []int64{30, 30, 30, 30, 30, 30, 30, 600, 600, 1800} {
+		at += delay * 1000
+		counter.Samples = append(counter.Samples, Sample{at, float64(len(counter.Samples))})
+	}
+	intervals, err := counterIntervals(counter, in.WindowStart, in.EvaluationTime, true)
+	if err != nil || len(intervals) != 7 {
+		t.Fatalf("expected only the 30s intervals: %+v %v", intervals, err)
 	}
 }

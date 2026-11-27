@@ -268,7 +268,9 @@ func counterIntervals(s Series, start, end int64, allowSlowerCadence bool) ([]Co
 		// a slower cadence. A single outage cannot widen its own allowance.
 		baseline := cadence
 		if allowSlowerCadence && i >= 3 {
-			baseline = max(baseline, min(gaps[i-2], gaps[i-3]))
+			// Bound the adjustment by the same three-cadence tolerance.
+			// Repeated outages cannot raise the baseline without limit.
+			baseline = max(baseline, min(3*cadence, gaps[i-2], gaps[i-3]))
 		}
 		if delta < 0 || gaps[i-1] > 3*baseline {
 			continue

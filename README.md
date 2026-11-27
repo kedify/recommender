@@ -16,7 +16,7 @@ output, err := analysis.Analyze(snapshot, policy)
 
 Callers fetch raw range vectors and map them into `analysis.Input`; calculations
 and CPU counter normalization happen in this package. Input schema v2 rejects v1
-input; results use output schema v3 and resource detector version 10. Consumers
+input; results use output schema v3 and resource detector version 11. Consumers
 should update generated output bindings and invalidate cached findings when upgrading.
 All timestamps are original Unix milliseconds, including current settings and
 identity. Do not stamp carried-forward values with query evaluation times. CPU
