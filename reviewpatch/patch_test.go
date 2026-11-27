@@ -256,6 +256,10 @@ func TestBuildForSettingKeepsOriginalEvidenceAndValidatesRetainedSibling(t *test
 	if strings.Contains(string(limit.Artifact.Patch), "requests") || limit.Artifact.EvidenceFingerprint != pair.Artifact.EvidenceFingerprint {
 		t.Fatalf("single limit patch or evidence changed: %+v", limit.Artifact)
 	}
+	out.Results[1].Recommendations = out.Results[1].Recommendations[:1]
+	if _, err = BuildForSetting("cluster", "", target, 1234, out, nil, analysis.ResourceMemory, analysis.SettingLimits); err == nil || !strings.Contains(err.Error(), "no eligible resource changes") {
+		t.Fatalf("selecting a limit without a recommendation: %v", err)
+	}
 }
 
 func TestExistingCPUOutputCannotBeExportedAsLegacyPolicy(t *testing.T) {

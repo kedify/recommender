@@ -524,15 +524,15 @@ func analyzeResource(in Input, c ContainerObservation, r Resource, p Policy, cap
 			downsizeSuppressed = downsizeSuppressed || isMaterial(s.current, s.suggested, bounds)
 			continue
 		}
-		// The strict policy also checks demand before introducing a CPU limit.
-		// An uncapped container does not need to establish CFS coverage.
-		// A held reduction keeps the current limit, which is above the suggested
-		// limit and therefore above any request recommended by this pass.
+		// Existing-cap review checks both directions. The legacy strict strategy
+		// also checks recurring demand before a first cap, which has no quota yet.
 		if r == ResourceCPU && s.setting == SettingLimits && p.CPU.LimitReductionGuard != nil && (p.CPU.ExistingLimitsOnly || s.suggested < s.current.Value || p.CPU.LimitReductionGuard.RequireCompleteCoverage && s.current.Value == 0) && isMaterial(s.current, s.suggested, bounds) {
 			if held := cpuLimitChangeHold(in, c, capReleaseStart, p.CPU, float64(p.Evidence.FreshnessSeconds), s.suggested, settingTrace); len(held) > 0 {
 				settingTrace.stop("retained", held...)
 				for _, reason := range held {
-					result.Notices = appendNotice(result.Notices, reason)
+					if reason != ReasonCPUIncreaseNoPressure {
+						result.Notices = appendNotice(result.Notices, reason)
+					}
 				}
 				if limitHoldReason == "" {
 					limitHoldReason = held[0]

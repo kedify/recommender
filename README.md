@@ -125,8 +125,9 @@ identified current runtimes, applied-quota boundaries and aligned CFS coverage
 for every eligible Pod. Cuts retain the recurring-demand and throttling vetoes.
 A numeric raise requires repeated pressure in verified current intervals and
 recurring measured demand on a pressured Pod materially above its current cap.
-The request-ratio candidate must fall within the configured material-change band
-of that measured demand times headroom. Otherwise the trace explains the hold.
+The request-ratio candidate must not materially exceed that measured demand
+times headroom. When measured demand exceeds the proposed cap, the estimate
+offers partial relief. The trace records the candidate and measured demand.
 For a Pod that stays at one restrictive quota, its measured consumption usually
 cannot establish the size of a raise. Earlier observations from the same runtime
 under a looser quota can provide that evidence.

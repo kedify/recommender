@@ -21,7 +21,7 @@ const (
 	ReasonCPULimitBelowDemand Reason = "cpu-limit-below-recurring-demand"
 	// ReasonCPULimitEvidenceIncomplete: strict coverage was requested but
 	// recurring demand or CFS coverage of every current eligible Pod could not
-	// be proven, so the reduction is held as unknown, never treated as zero.
+	// be proven, so the cap change is held.
 	ReasonCPULimitEvidenceIncomplete Reason = "cpu-limit-evidence-incomplete"
 	ReasonCPUIncreaseNoPressure      Reason = "cpu-limit-increase-without-repeated-pressure"
 	ReasonCPUIncreaseDemandUnknown   Reason = "cpu-limit-increase-amount-unproven"
@@ -178,11 +178,11 @@ func cpuLimitIncreaseHold(in Input, c ContainerObservation, obs ResourceObservat
 		return []Reason{ReasonCPUIncreaseDemandUnknown, ReasonCPULimitEvidenceIncomplete}
 	}
 	supported := demand * p.HeadroomCoefficient
-	// Reuse sizing materiality on both comparisons. An amount at the cap
-	// cannot establish unmet demand and a materially different 5× estimate
-	// cannot be justified by the measured bursts.
+	// Demand at the current cap cannot quantify a raise. The policy estimate
+	// may provide partial relief when measured demand exceeds it, but may not
+	// materially exceed the independently measured headroom.
 	passed := finite(supported) && demand > obs.CurrentLimit.Value && isMaterial(obs.CurrentLimit, demand, p.Bounds) &&
-		!isMaterial(Signal{Value: supported}, candidate, p.Bounds)
+		(candidate <= supported || !isMaterial(Signal{Value: supported}, candidate, p.Bounds))
 	trace.guard("recurring demand supports the proposed CPU limit increase", passed, map[string]float64{
 		"currentLimit": obs.CurrentLimit.Value, "recurringDemand": demand, "coefficient": p.HeadroomCoefficient,
 		"candidate": candidate, "minimumAbsoluteChange": p.Bounds.MinimumAbsoluteChange, "minimumRelativeChange": p.Bounds.MinimumRelativeChange,
@@ -403,13 +403,12 @@ func cpuGuardFlag(b bool) float64 {
 	return 0
 }
 
-// cpuCoverageSpanValues adds the verified-span totals to a copy of the trace
-// values; the lifetime-scan totals, which only sum repeated-positive series,
-// are left untouched.
 func (cov cpuThrottlingCoverageEvidence) coverageValues(freshnessSeconds float64) map[string]float64 {
 	return map[string]float64{"sourceComplete": cpuGuardFlag(cov.sourceComplete), "inventoryValid": cpuGuardFlag(cov.inventoryValid), "eligiblePods": float64(cov.eligiblePods), "expectedPods": float64(cov.expectedPods), "provenPods": float64(cov.provenPods), "minimumAlignedIntervals": cpuCoverageMinIntervals, "freshnessSeconds": freshnessSeconds}
 }
 
+// cpuCoverageSpanValues adds aligned-span totals alongside the lifetime-scan
+// totals, which only sum series with repeated pressure.
 func cpuCoverageSpanValues(values map[string]float64, cov cpuThrottlingCoverageEvidence) map[string]float64 {
 	out := make(map[string]float64, len(values)+6)
 	for k, v := range values {

@@ -60,12 +60,29 @@ func TestExistingCPULimitsPreservePrimarySizingAndGuardEstimates(t *testing.T) {
 				c.CPU.Series[0].Samples[i].Value = 349.9999
 			}
 		}, true, 0, ReasonCPUIncreaseDemandUnknown},
-		{"pressure with materially different demand", func(c *ContainerObservation) {
+		{"pressure with measured demand above the candidate", func(c *ContainerObservation) {
 			for i := 0; i < 3; i++ {
 				c.CPU.Series[0].Samples[i].Value = 900
 			}
+		}, true, 500, ""},
+		{"candidate materially exceeds measured headroom", func(c *ContainerObservation) {
+			for i := 0; i < 3; i++ {
+				c.CPU.Series[0].Samples[i].Value = 400
+			}
 		}, true, 0, ReasonCPUIncreaseDemandUnknown},
 		{"verified cut", func(c *ContainerObservation) { c.CPU.CurrentLimit.Value = 1000 }, false, 500, ""},
+		{"cut without applied quota", func(c *ContainerObservation) {
+			c.CPU.CurrentLimit.Value = 1000
+			c.Classification.Throttling.Seconds[0].CPUGuardStart = 0
+		}, false, 0, ReasonCPULimitEvidenceIncomplete},
+		{"cut without current runtime", func(c *ContainerObservation) {
+			c.CPU.CurrentLimit.Value = 1000
+			c.Inventory.CurrentPods = nil
+		}, false, 0, ReasonCPULimitEvidenceIncomplete},
+		{"cut with only one sample at current quota", func(c *ContainerObservation) {
+			c.CPU.CurrentLimit.Value = 1000
+			c.Classification.Throttling.Seconds[0].CPUGuardStart = c.Inventory.Timestamp
+		}, false, 0, ReasonCPULimitEvidenceIncomplete},
 		{"pressured cut", func(c *ContainerObservation) { c.CPU.CurrentLimit.Value = 1000 }, true, 0, ReasonCPUThrottlingPressure},
 		{"higher recurring bursts block cut", func(c *ContainerObservation) {
 			c.CPU.CurrentLimit.Value = 1000
@@ -109,6 +126,9 @@ func TestExistingCPULimitsPreservePrimarySizingAndGuardEstimates(t *testing.T) {
 			trace := guardSettingTrace(got.Results[1], SettingLimits)
 			if has != (tc.want > 0) || cap.SuggestedValue != tc.want || tc.reason != "" && !slices.Contains(trace.Reasons, tc.reason) {
 				t.Fatalf("cap=%+v, trace=%+v", cap, trace)
+			}
+			if slices.Contains(got.Results[1].Notices, ReasonCPUIncreaseNoPressure) {
+				t.Fatal("a healthy retained cap generated a notice")
 			}
 			if !got.EffectivePolicy.CPU.ExistingLimitsOnly || got.EffectivePolicy.CPU.LimitReductionGuard == nil {
 				t.Fatal("existing-only cap guard missing from replay policy")
@@ -176,8 +196,14 @@ func TestRaiseCannotCombinePressureAndDemandFromDifferentReplicas(t *testing.T) 
 		*family = append(*family, peer)
 	}
 	cpu := run(t, in, policy).Results[1]
-	if _, ok := guardRecommendation(cpu, SettingLimits); ok || !slices.Contains(guardSettingTrace(cpu, SettingLimits).Reasons, ReasonCPUIncreaseDemandUnknown) {
+	if _, ok := guardRecommendation(cpu, SettingLimits); ok || !slices.Equal(guardSettingTrace(cpu, SettingLimits).Reasons, []Reason{ReasonCPUIncreaseDemandUnknown}) {
 		t.Fatalf("cross-replica demand authorized an increase: %+v", cpu)
+	}
+	for i := 0; i < 3; i++ {
+		c.CPU.Series[0].Samples[i].Value = 490
+	}
+	if rec, ok := guardRecommendation(run(t, in, policy).Results[1], SettingLimits); !ok || rec.SuggestedValue != 500 {
+		t.Fatalf("verified pressure and demand on the same replica did not support 500m: %+v", rec)
 	}
 }
 
@@ -188,6 +214,7 @@ func TestExistingLimitsCannotEnableLegacyFullLimitSizing(t *testing.T) {
 		t.Fatal("accepted conflicting primary request strategy")
 	}
 	p.CPU.RequestsOnly = true
+	p.CPU.LimitReductionGuard = &CPULimitReductionGuardPolicy{RequireCompleteCoverage: true}
 	out := run(t, in, p)
 	// Decode the policy as an earlier reader, which ignores the additive field.
 	raw, _ := json.Marshal(out.EffectivePolicy)
@@ -206,7 +233,11 @@ func TestExistingLimitsCannotEnableLegacyFullLimitSizing(t *testing.T) {
 	if err := json.Unmarshal(raw, &old); err != nil {
 		t.Fatal(err)
 	}
-	if _, has := guardRecommendation(run(t, in, old).Results[1], SettingLimits); has {
+	legacy := run(t, in, old)
+	if legacy.PolicyVersion == out.PolicyVersion {
+		t.Fatal("existing-cap policy reused the primary-only fingerprint")
+	}
+	if _, has := guardRecommendation(legacy.Results[1], SettingLimits); has {
 		t.Fatal("legacy reader generated cap advice")
 	}
 }
