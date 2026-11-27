@@ -255,7 +255,7 @@ func analyzeResource(in Input, c ContainerObservation, r Resource, p Policy) (Re
 			// Historical evidence can fill a short history, but cannot justify a
 			// limit below a verified peak already reached by this rollout.
 			if r == ResourceMemory && p.Memory.SafetyGuards && usage.Available {
-				memoryFloor = usage.Value * headroom
+				memoryFloor = usage.Value * max(1, headroom)
 			}
 			if memoryFloor > 0 && usage.Value > fallbackUsage.Value {
 				requestTrace.step("current rollout memory peak floor", map[string]float64{"previousPeak": fallbackUsage.Value, "currentPeak": usage.Value})
@@ -370,6 +370,10 @@ func analyzeResource(in Input, c ContainerObservation, r Resource, p Policy) (Re
 	}
 	if !usageBlocked {
 		requestTrace.step("usage × headroom", map[string]float64{"usage": usage.Value, "coefficient": headroom, "candidate": rawSuggestedRequest})
+		if rawSuggestedRequest < memoryFloor {
+			requestTrace.step("current rollout peak minimum", map[string]float64{"before": rawSuggestedRequest, "candidate": memoryFloor})
+			rawSuggestedRequest = memoryFloor
+		}
 	} else {
 		confidence = 0 // There is no qualifying usage history to score.
 		source := sizingKills[len(sizingKills)-1]

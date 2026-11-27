@@ -28,6 +28,11 @@ func TestCurrentPeakFloorsPreviousReleaseSizing(t *testing.T) {
 		len(r.Recommendations) != 2 || r.Recommendations[1].SuggestedValue < 229*mib || r.Recommendations[1].Confidence >= 95 {
 		t.Fatalf("discarded current usage or borrowed historical confidence: %+v", r)
 	}
+	lowHeadroom := p
+	lowHeadroom.Memory.HeadroomCoefficient = .5
+	if r := run(t, in, lowHeadroom).Results[0]; len(r.Recommendations) != 2 || r.Recommendations[1].SuggestedValue != 200*mib {
+		t.Fatalf("low headroom cut below the current observed peak: %+v", r)
+	}
 	capped := p
 	capped.Memory.Bounds.Maximum = 128 * mib
 	if r := run(t, in, capped).Results[0]; len(r.Recommendations) != 0 {
@@ -186,6 +191,11 @@ func TestRecurringDemandOutlivesCounterCollectionAndProtectsNewCaps(t *testing.T
 	r := run(t, in, p).Results[1]
 	if limit, ok := guardRecommendation(r, SettingLimits); !ok || limit.SuggestedValue < 99.99 || limit.SuggestedValue > 100.01 {
 		t.Fatalf("healthy introduction incorrectly required CFS: %+v", r)
+	}
+	c.Inventory.CurrentPods["pod-1"] = 0
+	r = run(t, in, p).Results[1]
+	if _, ok := guardRecommendation(r, SettingLimits); ok || !slices.Contains(r.Notices, ReasonCPULimitEvidenceIncomplete) {
+		t.Fatalf("unknown runtime certified the first CPU cap: %+v", r)
 	}
 }
 

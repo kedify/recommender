@@ -41,12 +41,9 @@ const (
 // tick or isolated increment never holds a reduction.
 const cpuQuotaPressureMinIntervals = 2
 
-// CPULimitReductionGuardPolicy opts in to holding the final material reduction
-// of a known finite CPU limit. It never changes requests, memory, or limit
-// increases/introductions. Absent, partial, stale, pre-release, foreign or
-// malformed CFS counters never hold a reduction and are never treated as zero
-// throttling. Throttling holds only on repeated positive intervals in one
-// fresh, uniquely identified same-release lifetime.
+// CPULimitReductionGuardPolicy checks material CPU limit reductions against
+// recurring demand and repeated throttling in fresh same-release lifetimes.
+// Strict coverage also requires recurring demand to justify a new finite cap.
 type CPULimitReductionGuardPolicy struct {
 	// RecurringSamples is how many observations of one container lifetime must
 	// reach a demand level for it to count as recurring. Zero selects 3.
@@ -207,8 +204,14 @@ func strictRecurringCPUDemand(in Input, c ContainerObservation, obs ResourceObse
 			return 0, false
 		}
 		runtimeStart, current := c.Inventory.CurrentPods[series.PodUID]
-		if c.Inventory.CurrentPods != nil && !current {
-			continue
+		if c.Inventory.CurrentPods != nil {
+			if !current {
+				continue
+			}
+			// Membership alone cannot distinguish demand across a restart.
+			if runtimeStart <= 0 {
+				return 0, false
+			}
 		}
 		boundary := max(start, starts[series.PodUID], runtimeStart)
 		if runtimeStart > 0 && series.ID != "" && runtimes[series.PodUID] == series.ID {
