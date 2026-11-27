@@ -330,6 +330,7 @@ func TestPressureDoesNotBridgeOutages(t *testing.T) {
 		want int
 	}{
 		{"two long outages", []int64{600, 600, 1800}, 10},
+		{"long outages followed by shorter gap", []int64{600, 600, 250}, 10},
 		{"two shorter outages", []int64{100, 100, 240}, 10},
 		{"increasing gaps", []int64{50, 85, 145, 250, 430, 740}, 12},
 		{"recovery after outage", []int64{150, 30, 30}, 12},
