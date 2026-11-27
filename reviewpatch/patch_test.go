@@ -171,3 +171,21 @@ func TestRequestWithInheritedLimitBaselineIsWithheld(t *testing.T) {
 		t.Fatalf("unexpected result: %v", err)
 	}
 }
+
+func TestUnknownCPUSettingDoesNotDiscardMemoryPair(t *testing.T) {
+	target, out := oomResult()
+	cpu := &out.Results[0]
+	cpu.Evidence = out.Results[1].Evidence
+	cpu.Evidence.CurrentLimit.Available = false
+	cpu.Recommendations = []analysis.Recommendation{{Setting: analysis.SettingRequests, CurrentValue: 1000, SuggestedValue: 250}}
+	doc, err := Build("cluster", "", target, 1234, out, nil)
+	if err != nil || doc.Verify() != nil || len(doc.Artifact.Holds) != 1 || doc.Artifact.Holds[0].Resource != analysis.ResourceCPU ||
+		len(doc.Artifact.Changes) != 1 || doc.Artifact.Changes[0].Resource != analysis.ResourceMemory ||
+		doc.Artifact.Changes[0].After.Request == nil || doc.Artifact.Changes[0].After.Limit == nil {
+		t.Fatalf("partial review: %+v %v", doc, err)
+	}
+	cpu.Evidence.Identity.WorkloadUID = "another"
+	if _, err = Build("cluster", "", target, 1234, out, nil); err == nil {
+		t.Fatal("global identity mismatch allowed partial export")
+	}
+}

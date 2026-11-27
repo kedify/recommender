@@ -73,14 +73,6 @@ func normalizeCPULimitReductionGuard(g CPULimitReductionGuardPolicy) (CPULimitRe
 // throttling cannot see uncapped demand, so neither substitutes for the other.
 func cpuLimitReductionHold(in Input, c ContainerObservation, obs ResourceObservation, headroom float64, g CPULimitReductionGuardPolicy, freshnessSeconds float64, candidate float64, trace *SettingTrace) []Reason {
 	var held []Reason
-	if g.RequireCompleteCoverage && c.Classification != nil {
-		// Counter history may show an intervening rollout during a usage gap.
-		// Use it only for the guard's segment; the sizing policy keeps its own.
-		throttling := c.Classification.Throttling
-		releaseEvidence := c
-		releaseEvidence.CPU.Series = slices.Concat(c.CPU.Series, throttling.Periods, throttling.ThrottledPeriods, throttling.Seconds)
-		c.Identity = selectReleaseSegment(in, releaseEvidence).Identity
-	}
 	var demand float64
 	var complete bool
 	if g.RequireCompleteCoverage {
@@ -105,15 +97,17 @@ func cpuLimitReductionHold(in Input, c ContainerObservation, obs ResourceObserva
 	} else {
 		trace.step(ruleCPURecurringDemandUnknown, map[string]float64{"recurringSamples": float64(g.RecurringSamples)})
 	}
-	pressure := cpuQuotaPressure(in, c, freshnessSeconds)
-	values := map[string]float64{"freshLifetimes": float64(pressure.freshLifetimes), "staleLifetimes": float64(pressure.staleLifetimes), "pressuredLifetimes": float64(pressure.pressuredLifetimes), "isolatedLifetimes": float64(pressure.isolatedLifetimes), "positiveIntervals": float64(pressure.positiveIntervals), "minimumPositiveIntervals": cpuQuotaPressureMinIntervals, "freshnessSeconds": freshnessSeconds, "throttledPeriods": pressure.throttledPeriods, "throttledSeconds": pressure.throttledSeconds}
-	// Strict coverage is computed before the quota trace is chosen so proven
-	// coverage never also reports an unknown lifetime denominator. Legacy mode
-	// leaves cov zero (proven=false) and keeps its traces exactly.
+	if obs.CurrentLimit.Unset || obs.CurrentLimit.Value == 0 {
+		// An uncapped container has no CFS quota to verify. Its known demand
+		// must still fit the first proposed limit.
+		return held
+	}
 	var cov cpuThrottlingCoverageEvidence
 	if g.RequireCompleteCoverage {
 		cov = cpuThrottlingCoverage(in, c, obs, freshnessSeconds)
 	}
+	pressure := cpuQuotaPressure(in, c, freshnessSeconds, cov.proven)
+	values := map[string]float64{"freshLifetimes": float64(pressure.freshLifetimes), "staleLifetimes": float64(pressure.staleLifetimes), "pressuredLifetimes": float64(pressure.pressuredLifetimes), "isolatedLifetimes": float64(pressure.isolatedLifetimes), "positiveIntervals": float64(pressure.positiveIntervals), "minimumPositiveIntervals": cpuQuotaPressureMinIntervals, "freshnessSeconds": freshnessSeconds, "throttledPeriods": pressure.throttledPeriods, "throttledSeconds": pressure.throttledSeconds}
 	switch {
 	case pressure.pressuredLifetimes > 0:
 		// Repeated positive intervals in one fresh lifetime: actual evidence.
@@ -184,6 +178,7 @@ func strictRecurringCPUDemand(in Input, c ContainerObservation, obs ResourceObse
 	// this container lifetime was running. In particular, old usage must not
 	// supply recurring samples for a replacement container in the same Pod.
 	starts := make(map[string]int64)
+	runtimes := make(map[string]string)
 	if c.Classification != nil && c.Classification.Throttling.SourceComplete {
 		throttling := c.Classification.Throttling
 		for _, series := range throttling.Periods {
@@ -198,6 +193,7 @@ func strictRecurringCPUDemand(in Input, c ContainerObservation, obs ResourceObse
 				}
 			}
 			starts[series.PodUID] = max(starts[series.PodUID], first)
+			runtimes[series.PodUID] = series.ID
 		}
 	}
 	seen := make(map[string]bool)
@@ -210,7 +206,17 @@ func strictRecurringCPUDemand(in Input, c ContainerObservation, obs ResourceObse
 		if series.PodUID == "" || seen[series.PodUID] {
 			return 0, false
 		}
-		values, err := NormalizeSamples(series, max(start, starts[series.PodUID]), in.EvaluationTime)
+		runtimeStart, current := c.Inventory.CurrentPods[series.PodUID]
+		if c.Inventory.CurrentPods != nil && !current {
+			continue
+		}
+		boundary := max(start, starts[series.PodUID], runtimeStart)
+		if runtimeStart > 0 && series.ID != "" && runtimes[series.PodUID] == series.ID {
+			// The usage stream itself verifies the runtime. Delayed collection
+			// of CFS counters cannot erase recurring demand from that lifetime.
+			boundary = max(start, runtimeStart)
+		}
+		values, err := NormalizeSamples(series, boundary, in.EvaluationTime)
 		if err != nil || len(values) < count {
 			return 0, false
 		}
@@ -239,7 +245,7 @@ type cpuQuotaPressureEvidence struct {
 // pressured only with at least cpuQuotaPressureMinIntervals positive intervals.
 // Malformed, duplicated, foreign, or out-of-window series are skipped, never
 // errors; stale series are counted for the trace but never prove anything.
-func cpuQuotaPressure(in Input, c ContainerObservation, freshnessSeconds float64) cpuQuotaPressureEvidence {
+func cpuQuotaPressure(in Input, c ContainerObservation, freshnessSeconds float64, currentOnly bool) cpuQuotaPressureEvidence {
 	var e cpuQuotaPressureEvidence
 	if c.Classification == nil {
 		return e
@@ -259,10 +265,18 @@ func cpuQuotaPressure(in Input, c ContainerObservation, freshnessSeconds float64
 			total = &e.throttledSeconds
 		}
 		for _, s := range rows {
+			if _, current := c.Inventory.CurrentPods[s.PodUID]; currentOnly &&
+				(c.Inventory.CurrentPods != nil && !current || !cpuCounterSeriesCurrent(s, start, in, freshnessSeconds, throttling.CoverageAt)) {
+				continue
+			}
 			if s.ID == "" || s.WorkloadUID == "" || s.Release == "" || s.WorkloadUID != c.Target.WorkloadUID || s.Release != c.Target.Release || count[s.ID] != 1 {
 				continue
 			}
-			intervals, err := CounterIntervals(s, start, in.EvaluationTime)
+			since := start
+			if currentOnly {
+				since = max(since, c.Inventory.CurrentPods[s.PodUID])
+			}
+			intervals, err := CounterIntervals(s, since, in.EvaluationTime)
 			if err != nil || len(intervals) == 0 {
 				continue
 			}
@@ -403,6 +417,9 @@ func cpuThrottlingCoverage(in Input, c ContainerObservation, obs ResourceObserva
 		if !cpuGuardFresh(latest, in, freshnessSeconds) {
 			continue
 		}
+		if _, current := inv.CurrentPods[s.PodUID]; inv.CurrentPods != nil && !current {
+			continue
+		}
 		if s.PodUID == "" || expected[s.PodUID] {
 			// An unattributable or repeated Pod makes the expected set unreliable.
 			return e
@@ -447,10 +464,11 @@ func cpuThrottlingCoverage(in Input, c ContainerObservation, obs ResourceObserva
 		p, okP := byPod[0][pod]
 		th, okT := byPod[1][pod]
 		sec, okS := byPod[2][pod]
-		if !okP || !okT || !okS || p.ID != th.ID || p.ID != sec.ID {
+		runtimeStart := inv.CurrentPods[pod]
+		if !okP || !okT || !okS || p.ID != th.ID || p.ID != sec.ID || inv.CurrentPods != nil && runtimeStart <= 0 {
 			continue
 		}
-		span, ok := cpuCoverageSpan(p, th, sec, start, in, freshnessSeconds, throttling.CoverageAt)
+		span, ok := cpuCoverageSpan(p, th, sec, max(start, runtimeStart), in, freshnessSeconds, throttling.CoverageAt)
 		if !ok {
 			continue
 		}

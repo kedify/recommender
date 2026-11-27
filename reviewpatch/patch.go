@@ -94,10 +94,6 @@ func UnperformedChecks() []Check {
 		{Name: "revision", Status: Unperformed},
 		{Name: "currentResources", Status: Unperformed},
 		{Name: "freshness", Status: Unperformed},
-		{Name: "ownership", Status: Unperformed},
-		{Name: "writeRBAC", Status: Unperformed},
-		{Name: "serverDryRun", Status: Unperformed},
-		{Name: "quotaLimitRangeAndDisruption", Status: Unperformed},
 	}
 }
 
@@ -152,6 +148,14 @@ func Build(cluster, shard string, target analysis.Target, evaluatedAt int64, out
 		if len(result.Recommendations) == 0 {
 			continue
 		}
+		identity := result.Evidence.Identity
+		if !identity.Available || identity.Ambiguous || identity.WorkloadUID != target.WorkloadUID || identity.Release != target.Release {
+			return Document{}, errors.New("current workload identity is unknown")
+		}
+		if !result.Evidence.CurrentRequest.Available || !result.Evidence.CurrentLimit.Available {
+			artifact.Holds = append(artifact.Holds, Hold{Resource: resource, Reason: "current request or limit is unknown"})
+			continue
+		}
 		change, err := buildChange(*result)
 		if err != nil {
 			return Document{}, fmt.Errorf("%s: %w", resource, err)
@@ -195,11 +199,6 @@ func findResult(results []analysis.ResourceAnalysis, target analysis.Target, res
 }
 
 func buildChange(result analysis.ResourceAnalysis) (Change, error) {
-	identity := result.Evidence.Identity
-	if !identity.Available || identity.Ambiguous ||
-		identity.WorkloadUID != result.Target.WorkloadUID || identity.Release != result.Target.Release {
-		return Change{}, errors.New("current workload identity is unknown")
-	}
 	request, err := currentValue(result.Resource, result.Evidence.CurrentRequest)
 	if err != nil {
 		return Change{}, err

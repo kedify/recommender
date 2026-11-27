@@ -40,7 +40,7 @@ func previousReleaseUsage(in Input, c ContainerObservation, resource Resource, p
 		past.Identity.ReleaseStartedAt = previous.ReleaseStartedAt
 		past.Identity.ReleaseStartInferred = false
 		past.CPU.Series, past.Memory.Series = previous.CPU, previous.Memory
-		past = selectReleaseSegment(pastIn, past)
+		past = selectReleaseSegment(pastIn, past, false)
 		obs := past.Memory
 		if resource == ResourceCPU {
 			obs = past.CPU

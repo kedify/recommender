@@ -81,10 +81,11 @@ func analyzeMemoryLeak(in Input, c ContainerObservation, p Policy, resource Reso
 		}
 		// analyzeResource already validated selected series and conflicting samples.
 		// Keep the first observed time before the leak lookback for warmup handling.
+		runtimeStart := c.Inventory.CurrentPods[s.PodUID]
 		firstObserved := int64(0)
 		var samples []Sample
 		for _, sample := range s.Samples {
-			if sample.Timestamp < max(in.WindowStart, c.Identity.ReleaseStartedAt) || sample.Timestamp > in.EvaluationTime {
+			if sample.Timestamp < max(in.WindowStart, c.Identity.ReleaseStartedAt, runtimeStart) || sample.Timestamp > in.EvaluationTime {
 				continue
 			}
 			if firstObserved == 0 || sample.Timestamp < firstObserved {

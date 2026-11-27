@@ -30,12 +30,21 @@ func selectOOMKills(in Input, c ContainerObservation) ([]OOMKill, error) {
 			return nil, fmt.Errorf("OOM kill memory limit must be finite and nonnegative")
 		}
 		if previous, ok := seen[kill.ID]; ok {
+			// Two sources can observe the same termination with different
+			// capabilities. Preserve the verified limit when just one knows it.
+			if previous.MemoryLimitBytes == 0 || kill.MemoryLimitBytes == 0 {
+				known := max(previous.MemoryLimitBytes, kill.MemoryLimitBytes)
+				previous.MemoryLimitBytes, kill.MemoryLimitBytes = known, known
+			}
 			if previous != kill {
 				return nil, fmt.Errorf("conflicting observations for OOM kill %q", kill.ID)
 			}
+			seen[kill.ID] = kill
 			continue
 		}
 		seen[kill.ID] = kill
+	}
+	for _, kill := range seen {
 		// Validate every supplied observation, including conflicts across the
 		// selection boundary, before deciding whether it affects this analysis.
 		if kill.Timestamp < start || kill.Timestamp > in.EvaluationTime || kill.WorkloadUID != c.Target.WorkloadUID || kill.Release != c.Target.Release {

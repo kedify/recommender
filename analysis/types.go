@@ -8,7 +8,7 @@ package analysis
 const (
 	InputSchemaVersion               = "resource-analysis-input/v2"
 	OutputSchemaVersion              = "resource-analysis-output/v3"
-	ResourceRightSizeDetectorVersion = "9"
+	ResourceRightSizeDetectorVersion = "10"
 	MaxPreviousReleases              = 3
 )
 
@@ -36,6 +36,8 @@ type ContainerObservation struct {
 	CPU            ResourceObservation        `json:"cpu"`
 	Memory         ResourceObservation        `json:"memory"`
 	OOMKills       []OOMKill                  `json:"oomKills,omitempty"`
+	// Failed or incomplete collection prevents decreases and new finite memory limits.
+	OOMCoverageIncomplete bool `json:"oomCoverageIncomplete,omitempty"`
 	// Newest first. Only the first three entries are eligible as fallback usage.
 	PreviousReleases []PreviousRelease `json:"previousReleases,omitempty"`
 }
@@ -80,6 +82,8 @@ type CurrentIdentity struct {
 	ReleaseStartedAt     int64  `json:"releaseStartedAt"`
 	Ambiguous            bool   `json:"ambiguous"`
 	ReleaseStartInferred bool   `json:"releaseStartInferred"`
+	// A recorded activation or intervening release fences events from a prior activation.
+	RolloutBoundaryVerified bool `json:"rolloutBoundaryVerified,omitempty"`
 }
 
 // Counts refer to the selected UID/release/container. Observed is a distinct
@@ -90,6 +94,9 @@ type Inventory struct {
 	Eligible  int   `json:"eligible"`
 	Observed  int   `json:"observed"`
 	Excluded  int   `json:"excluded"`
+	// Exact current Pod UIDs and their observed running-container start times (Unix ms).
+	// Zero means the lifetime start is unknown. Absent in legacy observations.
+	CurrentPods map[string]int64 `json:"currentPods,omitempty"`
 }
 type ResourceObservation struct {
 	Series         []Series `json:"series"`

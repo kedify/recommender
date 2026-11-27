@@ -16,7 +16,7 @@ output, err := analysis.Analyze(snapshot, policy)
 
 Callers fetch raw range vectors and map them into `analysis.Input`; calculations
 and CPU counter normalization happen in this package. Input schema v2 rejects v1
-input; results use output schema v3 and resource detector version 9. Consumers
+input; results use output schema v3 and resource detector version 10. Consumers
 should update generated output bindings and invalidate cached findings when upgrading.
 All timestamps are original Unix milliseconds, including current settings and
 identity. Do not stamp carried-forward values with query evaluation times. CPU
@@ -117,6 +117,21 @@ the retained request. Every resource returns measured evidence and explicit qual
 reasons; an empty recommendation list always includes a no-action reason. Detector
 and normalized-policy identities are independent from schema versions. Consumers
 should pin a released module version and invalidate/recompute old findings.
+
+When an adapter supplies `inventory.currentPods`, the keys identify current Pods
+and the values give the running container start time in Unix milliseconds. A zero
+start preserves Pod identity while leaving the runtime unknown. Historical usage
+can inform the aggregate. Only fresh members of this snapshot establish current
+coverage. Strict CPU-limit proof requires aligned counters at the current applied
+quota and runtime. The adapter bounds those counter series to the verified quota
+segment. New CPU limits require recurring demand to fit without requiring CFS
+counters from an uncapped container.
+
+With memory safety enabled, a shorter current rollout's observed peak floors a
+historical estimate. An incomplete OOM collection holds memory reductions and
+new limits. A verified current Pod's earlier OOM can predate a collector's first
+observation. A recorded activation or intervening rollout still excludes old
+events.
 
 ## OOM observations
 

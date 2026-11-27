@@ -15,13 +15,11 @@ func classifyWorkload(in Input, c ContainerObservation, p Policy) (WorkloadClass
 	if c.Classification != nil {
 		obs = *c.Classification
 	}
-	c.OOMKills = append(append([]OOMKill(nil), c.OOMKills...), obs.OOMKills...)
+	if !p.Memory.SafetyGuards {
+		c.OOMKills = slices.Concat(c.OOMKills, obs.OOMKills)
+		c = selectReleaseSegment(in, c, true)
+	}
 	c.PreviousReleases = nil
-	// Throttling can establish the classification window, but is never usage
-	// evidence for variance, memory leaks, or resource sizing.
-	releaseEvidence := c
-	releaseEvidence.CPU.Series = slices.Concat(c.CPU.Series, obs.Throttling.Seconds, obs.Throttling.ThrottledPeriods, obs.Throttling.Periods)
-	c.Identity = selectReleaseSegment(in, releaseEvidence).Identity
 	start := max(in.WindowStart, c.Identity.ReleaseStartedAt)
 	out := WorkloadClassification{DetectorVersion: ClassificationDetectorVersion, Target: c.Target, WindowStart: start, WindowEnd: in.EvaluationTime, Features: []WorkloadFeature{}, Issues: append([]string(nil), obs.Issues...)}
 	features := []WorkloadFeature{FeatureLeaderElection, FeatureHighVarianceCPU, FeatureHighVarianceMemory, FeatureOOMKilled, FeatureMemoryLeak, FeatureCPUThrottled, FeatureHTTPTraffic, FeatureMetrics}
@@ -86,7 +84,9 @@ func classifyWorkload(in Input, c ContainerObservation, p Policy) (WorkloadClass
 			// sizing evidence or leak findings to alter the original resource result.
 			noOOM := c
 			noOOM.OOMKills = nil
-			resource, err := analyzeResource(in, noOOM, ResourceMemory, lp)
+			qualityPolicy := lp
+			qualityPolicy.Memory.SafetyGuards = false
+			resource, err := analyzeResource(in, noOOM, ResourceMemory, qualityPolicy)
 			if err != nil {
 				return out, err
 			}

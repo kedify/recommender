@@ -11,6 +11,8 @@ import "math"
 // that actually supplied a baseline, not merely allocated bucket slots.
 const memorySafetyMinimumUsableBuckets = 6
 
+const ReasonOOMCoverageIncomplete Reason = "oom-coverage-incomplete"
+
 // knownLimitOOMKills keeps events whose finite limit at termination is known.
 // Unknown events stay in the evidence and still block reductions, but their
 // failed limit is never replaced by a later allocation or by usage.
@@ -57,6 +59,10 @@ func memoryGrowthHold(in Input, c ContainerObservation, p Policy, resource Resou
 	bucketSeconds := float64(leakPolicy.BucketDurationSeconds)
 	minimum := max(memorySafetyMinimumUsableBuckets, int(math.Ceil(float64(leakPolicy.MinimumHistorySeconds)/bucketSeconds)))
 	for _, e := range leak.Episodes {
+		if c.Inventory.CurrentPods != nil && c.Inventory.CurrentPods[e.PodUID] <= 0 {
+			// The observed growth must belong to a live, continuous runtime.
+			continue
+		}
 		if c.Identity.ReleaseStartInferred && e.PodUID == "" {
 			continue
 		}
