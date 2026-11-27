@@ -265,3 +265,89 @@ func TestEndpointClassificationNeedsNoUsageHistory(t *testing.T) {
 		t.Fatal("endpoint classification depended on utilization history")
 	}
 }
+
+func TestThrottlingAfterFastStartupScrapes(t *testing.T) {
+	in := fixture(3600, 20)
+	periods := counterFixture(in, nil)
+	throttled := counterFixture(in, nil)
+	seconds := counterFixture(in, nil)
+	at := in.EvaluationTime - 162000
+	var total, limited, duration float64
+	add := func(gap, newPeriods, limitedPeriods, blockedSeconds float64) {
+		at += int64(gap * 1000)
+		total += newPeriods
+		limited += limitedPeriods
+		duration += blockedSeconds
+		periods.Samples = append(periods.Samples, Sample{at, total})
+		throttled.Samples = append(throttled.Samples, Sample{at, limited})
+		seconds.Samples = append(seconds.Samples, Sample{at, duration})
+	}
+	add(0, 0, 0, 0)
+	for range 7 {
+		add(6, 60, 0, 0)
+	}
+	for range 4 {
+		add(30, 300, 278, 7)
+	}
+	in.Containers[0].Classification = &ClassificationObservation{Throttling: CPUThrottlingObservation{
+		Periods: []Series{periods}, ThrottledPeriods: []Series{throttled}, Seconds: []Series{seconds},
+	}}
+	f := finding(classified(t, in), FeatureCPUThrottled)
+	if f.Status != ClassificationDetected || len(f.Throttling) != 1 {
+		t.Fatalf("periodic throttling after startup: %+v", f)
+	}
+	e := f.Throttling[0]
+	if e.ObservedIntervals != 9 || e.ObservedSeconds != 102 || e.ThrottledSeconds == nil || *e.ThrottledSeconds != 14 || e.ThrottledPeriods == nil || *e.ThrottledPeriods != 556 {
+		t.Fatalf("expected seven fast and two corroborated periodic intervals: %+v", e)
+	}
+	baseline := run(t, fixture(3600, 20), guardTestPolicy()).Results[1]
+	if _, ok := guardRecommendation(baseline, SettingLimits); !ok {
+		t.Fatal("control must have an eligible limit cut")
+	}
+	cpu := run(t, in, guardTestPolicy()).Results[1]
+	request, ok := guardRecommendation(cpu, SettingRequests)
+	wantRequest, _ := guardRecommendation(baseline, SettingRequests)
+	if !ok || request != wantRequest || !guardHasReason(cpu.Notices, ReasonCPUThrottlingPressure) {
+		t.Fatalf("mixed-cadence pressure must retain the cap independently of requests: %+v", cpu.Notices)
+	}
+	// A missing scrape window after the transition cannot certify new deltas.
+	in.EvaluationTime += 150000
+	add(150, 1500, 1000, 50)
+	intervals, err := counterIntervals(seconds, in.WindowStart, in.EvaluationTime, true)
+	if err != nil || len(intervals) != 9 || intervals[len(intervals)-1].End == at {
+		t.Fatalf("gap after the cadence change: %+v %v", intervals, err)
+	}
+	strict, err := CounterIntervals(seconds, in.WindowStart, in.EvaluationTime)
+	if err != nil || len(strict) != 7 {
+		t.Fatalf("slower-cadence observations certified a limit cut: %+v %v", strict, err)
+	}
+}
+
+func TestPressureDoesNotBridgeOutages(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		tail []int64
+		want int
+	}{
+		{"two long outages", []int64{600, 600, 1800}, 10},
+		{"long outages followed by shorter gap", []int64{600, 600, 250}, 10},
+		{"two shorter outages", []int64{100, 100, 240}, 10},
+		{"increasing gaps", []int64{50, 85, 145, 250, 430, 740}, 12},
+		{"recovery after outage", []int64{150, 30, 30}, 12},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			in := fixture(7200, 60)
+			counter := counterFixture(in, nil)
+			at := in.WindowStart
+			counter.Samples = append(counter.Samples, Sample{Timestamp: at})
+			for _, gap := range append([]int64{30, 30, 30, 30, 30, 30, 30, 30, 30, 30}, tc.tail...) {
+				at += gap * 1000
+				counter.Samples = append(counter.Samples, Sample{at, float64(len(counter.Samples))})
+			}
+			intervals, err := counterIntervals(counter, in.WindowStart, in.EvaluationTime, true)
+			if err != nil || len(intervals) != tc.want {
+				t.Fatalf("expected %d valid intervals, got %+v, %v", tc.want, intervals, err)
+			}
+		})
+	}
+}

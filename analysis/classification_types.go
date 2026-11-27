@@ -3,7 +3,7 @@
 // See LICENSE and PUBLIC_SOURCE_LICENSE.
 package analysis
 
-const ClassificationDetectorVersion = "2"
+const ClassificationDetectorVersion = "3"
 
 // ClassificationPolicy enables advisory classification with versioned defaults.
 // It never changes resource sizing, OOM adjustments or sizing notices.
@@ -126,9 +126,11 @@ type VarianceEvidence struct {
 	Spread                 float64 `json:"spread"`
 }
 type CPUThrottlingEvidence struct {
-	SeriesID               string   `json:"seriesID"`
-	PodUID                 string   `json:"podUID,omitempty"`
+	SeriesID string `json:"seriesID"`
+	PodUID   string `json:"podUID,omitempty"`
+	// Elapsed time and count cover the same accepted seconds-counter intervals.
 	ObservedSeconds        float64  `json:"observedSeconds"`
+	ObservedIntervals      int      `json:"observedIntervals,omitempty"`
 	ThrottledSeconds       *float64 `json:"throttledSeconds,omitempty"`
 	SecondsPerSecond       *float64 `json:"secondsPerSecond,omitempty"`
 	Periods                *float64 `json:"periods,omitempty"`
