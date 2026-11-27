@@ -4,6 +4,7 @@
 package analysis
 
 import (
+	"encoding/json"
 	"slices"
 	"testing"
 )
@@ -26,6 +27,11 @@ func TestCurrentPeakFloorsPreviousReleaseSizing(t *testing.T) {
 	if r.RolloutFallback == nil || r.DecisionTrace.Source.Release != "A" || r.Evidence.AggregatedUsage.Value != 200*mib ||
 		len(r.Recommendations) != 2 || r.Recommendations[1].SuggestedValue < 229*mib || r.Recommendations[1].Confidence >= 95 {
 		t.Fatalf("discarded current usage or borrowed historical confidence: %+v", r)
+	}
+	capped := p
+	capped.Memory.Bounds.Maximum = 128 * mib
+	if r := run(t, in, capped).Results[0]; len(r.Recommendations) != 0 {
+		t.Fatalf("a policy maximum below current usage authorized a reduction: %+v", r)
 	}
 	c.OOMKills = []OOMKill{oomKill("failed", epoch+60_000, 512*mib)}
 	r = run(t, in, p).Results[0]
@@ -105,7 +111,7 @@ func TestRetiredReplicaCannotSupplyCoverageOrOngoingGrowth(t *testing.T) {
 	c.Inventory.CurrentPods = map[string]int64{"replacement": epoch}
 	p := safetyPolicy(DefaultPolicy())
 	r := run(t, in, p).Results[0]
-	if len(r.Recommendations) != 0 || !has(r.DataQuality, ReasonIncompleteInventory) {
+	if len(r.Recommendations) != 0 || r.Evidence.Inventory.Observed != 0 || !has(r.DataQuality, ReasonIncompleteInventory) {
 		t.Fatalf("retired replica substituted for live: %+v", r)
 	}
 	survivor := c.Memory.Series[0]
@@ -145,13 +151,19 @@ func TestRecurringDemandOutlivesCounterCollectionAndProtectsNewCaps(t *testing.T
 	c := &in.Containers[0]
 	c.Inventory.CurrentPods = map[string]int64{"pod-1": epoch}
 	s := &c.CPU.Series[0]
-	s.ID = "runtime"
-	for i := range s.Samples {
-		s.Samples[i].Value = 20
+	s.ID, s.Kind = "runtime", SampleCPUCounterSeconds
+	setUsage := func(bursty bool) {
+		total := 0.0
+		for i := range s.Samples {
+			rate := 20.0
+			if bursty && (i == 10 || i == 30 || i == 50) {
+				rate = 800
+			}
+			total += rate / 1000 * 60
+			s.Samples[i].Value = total
+		}
 	}
-	for _, i := range []int{10, 30, 50} {
-		s.Samples[i].Value = 800
-	}
+	setUsage(true)
 	mk := func(step float64) Series {
 		row := guardCounter(s.ID, "A", in.EvaluationTime-5*60_000, guardRamp(6, step))
 		row.PodUID = s.PodUID
@@ -170,11 +182,9 @@ func TestRecurringDemandOutlivesCounterCollectionAndProtectsNewCaps(t *testing.T
 			t.Fatalf("unset=%v: %+v", unset, r)
 		}
 	}
-	for _, i := range []int{10, 30, 50} {
-		s.Samples[i].Value = 20
-	}
+	setUsage(false)
 	r := run(t, in, p).Results[1]
-	if limit, ok := guardRecommendation(r, SettingLimits); !ok || limit.SuggestedValue != 100 {
+	if limit, ok := guardRecommendation(r, SettingLimits); !ok || limit.SuggestedValue < 99.99 || limit.SuggestedValue > 100.01 {
 		t.Fatalf("healthy introduction incorrectly required CFS: %+v", r)
 	}
 }
@@ -190,5 +200,45 @@ func TestConcurrentPreviousReleaseOOMCannotFenceCurrentUsage(t *testing.T) {
 	if !slices.Equal(before.Results[0].Recommendations, after.Results[0].Recommendations) ||
 		before.Results[0].Evidence.Identity.ReleaseStartedAt != after.Results[0].Evidence.Identity.ReleaseStartedAt {
 		t.Fatal("historical event moved an active rollout's boundary")
+	}
+}
+
+func TestRecordedEmptyCurrentMembershipCannotBecomeLegacyCounts(t *testing.T) {
+	in := fixture(600, 60)
+	in.Containers[0].Inventory.CurrentPods = map[string]int64{}
+	encoded, err := json.Marshal(in)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var saved Input
+	if err := json.Unmarshal(encoded, &saved); err != nil {
+		t.Fatal(err)
+	}
+	r := run(t, saved, safetyPolicy(shortPolicy())).Results[0]
+	if len(r.Recommendations) != 0 || r.Evidence.Inventory.Observed != 0 || !has(r.DataQuality, ReasonIncompleteInventory) {
+		t.Fatalf("saved membership lost its exact-set semantics: %+v", r)
+	}
+}
+
+func TestVerifiedCurrentQuotaIsIndependentOfRetiredAdvisoryPressure(t *testing.T) {
+	in := guardCoverageInput(make([]float64, 11))
+	c := &in.Containers[0]
+	c.Inventory.CurrentPods = map[string]int64{"pod-1": epoch + 7*60_000}
+	o := guardCFS(&in)
+	o.CoverageAt = in.EvaluationTime
+	for _, rows := range [][]Series{o.Periods, o.ThrottledPeriods, o.Seconds} {
+		rows[0].Samples = rows[0].Samples[7:]
+	}
+	old := guardFamily("retired", "pod-1", guardRamp(7, 5))
+	old.CPUGuardAdvisoryOnly = true
+	o.ThrottledPeriods = append(o.ThrottledPeriods, old)
+	result := run(t, in, guardStrictPolicy()).Results[1]
+	if rec, ok := guardRecommendation(result, SettingLimits); !ok || rec.SuggestedValue != 150 {
+		t.Fatalf("retired quota blocked a verified current reduction: %+v", result)
+	}
+	o.SourceComplete = false
+	result = run(t, in, guardStrictPolicy()).Results[1]
+	if _, ok := guardRecommendation(result, SettingLimits); ok || !slices.Contains(result.Notices, ReasonCPULimitEvidenceIncomplete) {
+		t.Fatalf("unverified quota authorized a reduction: %+v", result)
 	}
 }

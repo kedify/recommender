@@ -239,6 +239,12 @@ func analyzeResource(in Input, c ContainerObservation, r Resource, p Policy) (Re
 	if err != nil {
 		return ResourceAnalysis{}, err
 	}
+	if c.Inventory.CurrentPods != nil {
+		// The source may know the whole membership while this resource has
+		// samples for only a subset. Explanations report that intersection.
+		result.Evidence.Inventory.Observed = min(c.Inventory.Observed, observed)
+	}
+	var memoryFloor float64
 	if !identityBlocked && insufficientRolloutUsage(*q) {
 		currentSource := trace.Source
 		fallbackUsage, fallbackConfidence, fallbackQuality, fallback, fallbackErr := previousReleaseUsage(in, c, r, p, *q, trace)
@@ -248,7 +254,10 @@ func analyzeResource(in Input, c ContainerObservation, r Resource, p Policy) (Re
 		if fallback != nil {
 			// Historical evidence can fill a short history, but cannot justify a
 			// limit below a verified peak already reached by this rollout.
-			if r == ResourceMemory && p.Memory.SafetyGuards && usage.Available && usage.Value > fallbackUsage.Value {
+			if r == ResourceMemory && p.Memory.SafetyGuards && usage.Available {
+				memoryFloor = usage.Value * headroom
+			}
+			if memoryFloor > 0 && usage.Value > fallbackUsage.Value {
 				requestTrace.step("current rollout memory peak floor", map[string]float64{"previousPeak": fallbackUsage.Value, "currentPeak": usage.Value})
 				trace.Source = currentSource
 				fallbackConfidence = min(fallbackConfidence, confidence)
@@ -376,6 +385,9 @@ func analyzeResource(in Input, c ContainerObservation, r Resource, p Policy) (Re
 	}
 	if adjustment != nil {
 		result.OOMAdjustment = adjustment
+		if p.Memory.SafetyGuards {
+			memoryFloor = max(memoryFloor, adjustment.OOMRequestFloorBytes)
+		}
 		rawSuggestedRequest = math.Max(rawSuggestedRequest, adjustment.OOMRequestFloorBytes)
 		requestTrace.step("OOM floor", map[string]float64{"baseline": adjustment.BaselineRequestBytes, "floor": adjustment.OOMRequestFloorBytes, "candidate": rawSuggestedRequest, "coefficient": p.Memory.OOMKilledCoefficient})
 	}
@@ -436,9 +448,7 @@ func analyzeResource(in Input, c ContainerObservation, r Resource, p Policy) (Re
 			}
 			continue
 		}
-		if r == ResourceMemory && p.Memory.SafetyGuards && adjustment != nil &&
-			s.setting == SettingLimits && (s.current.Unset || s.suggested < s.current.Value) &&
-			s.suggested < adjustment.OOMRequestFloorBytes {
+		if s.suggested < memoryFloor && (s.suggested < s.current.Value || s.setting == SettingLimits && s.current.Unset) {
 			settingTrace.stop("retained", ReasonBounds)
 			boundsSuppressedAction = true
 			continue
@@ -653,7 +663,7 @@ func normalizeUsage(in Input, c ContainerObservation, obs ResourceObservation, r
 		}
 		last := timestamps[len(timestamps)-1]
 		runtimeStart, current := c.Inventory.CurrentPods[s.PodUID]
-		if (c.Inventory.CurrentPods == nil || current && last >= runtimeStart) && !stale(last, in, p.Evidence) {
+		if (c.Inventory.CurrentPods == nil || s.PodUID != "" && current && last >= runtimeStart) && !stale(last, in, p.Evidence) {
 			pods[pod] = true
 		}
 		releaseTimes = append(releaseTimes, timestamps...)

@@ -96,7 +96,7 @@ type Inventory struct {
 	Excluded  int   `json:"excluded"`
 	// Exact current Pod UIDs and their observed running-container start times (Unix ms).
 	// Zero means the lifetime start is unknown. Absent in legacy observations.
-	CurrentPods map[string]int64 `json:"currentPods,omitempty"`
+	CurrentPods map[string]int64 `json:"currentPods,omitzero"`
 }
 type ResourceObservation struct {
 	Series         []Series `json:"series"`
