@@ -216,6 +216,14 @@ func strictRecurringCPUDemand(in Input, c ContainerObservation, obs ResourceObse
 		if err != nil || len(values) < count {
 			return 0, false
 		}
+		if boundary > max(start, runtimeStart) {
+			// Legacy sources must supply enough observations after CFS began,
+			// but a late first counter cannot erase measured recurring bursts.
+			values, err = NormalizeSamples(series, max(start, runtimeStart), in.EvaluationTime)
+			if err != nil {
+				return 0, false
+			}
+		}
 		seen[series.PodUID] = true
 		slices.SortFunc(values, func(a, b Sample) int {
 			return cmp.Compare(a.Value, b.Value)

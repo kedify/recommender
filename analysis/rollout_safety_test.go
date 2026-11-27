@@ -151,6 +151,9 @@ func TestMemoryGrowthRequiresContinuousRuntime(t *testing.T) {
 	}{{epoch, true}, {epoch + 5*3600_000, false}, {0, false}} {
 		c.Inventory.CurrentPods = map[string]int64{"pod-1": tc.start}
 		r := run(t, in, p).Results[0]
+		if tc.start == 0 && (len(r.Recommendations) != 0 || !slices.Contains(r.Notices, ReasonMemoryGrowthContinuityUnknown)) {
+			t.Fatalf("uncertain continuity authorized a cut or claimed proven growth: %+v", r)
+		}
 		if slices.Contains(r.Notices, ReasonMemoryBaselineGrowth) != tc.hold {
 			t.Fatalf("start=%d incorrect growth decision: %+v", tc.start, r)
 		}
@@ -186,6 +189,13 @@ func TestRecurringDemandOutlivesCounterCollectionAndProtectsNewCaps(t *testing.T
 	// Source-specific usage and quota metric IDs both identify the same Pod
 	// with a verified runtime start. Their IDs need not match across metrics.
 	s.ID = "cpu-usage"
+	c.Classification.Throttling.CoverageAt = in.EvaluationTime
+	c.Inventory.CurrentPods = nil
+	legacy := run(t, in, p).Results[1]
+	if _, ok := guardRecommendation(legacy, SettingLimits); ok || !slices.Contains(legacy.Notices, ReasonCPULimitBelowDemand) {
+		t.Fatalf("legacy counter completeness erased measured demand: %+v", legacy)
+	}
+	c.Inventory.CurrentPods = map[string]int64{"pod-1": epoch}
 	current := c.CPU.CurrentLimit
 	for _, limit := range []Signal{current, {Available: true, Timestamp: in.EvaluationTime}, {Available: true, Unset: true, Timestamp: in.EvaluationTime}} {
 		c.CPU.CurrentLimit = limit
@@ -273,9 +283,12 @@ func TestVerifiedRolloutBoundarySurvivesOverlappingCounters(t *testing.T) {
 	c.Classification = &ClassificationObservation{Throttling: CPUThrottlingObservation{Periods: []Series{guardCounter("previous", "B", epoch+10*60000, []float64{0, 3})}}}
 	p := safetyPolicy(shortPolicy())
 	p.Classification = &ClassificationPolicy{}
-	o := run(t, in, p)
-	if r := o.Results[0]; r.OOMAdjustment == nil || r.OOMAdjustment.OOMRequestFloorBytes != 768*mib || len(finding(o.Classifications[0], FeatureOOMKilled).OOMKills) != 1 {
-		t.Fatalf("concurrent release erased a current OOM: %+v", r)
+	for _, verified := range []bool{true, false} {
+		c.Identity.RolloutBoundaryVerified = verified
+		o := run(t, in, p)
+		if r := o.Results[0]; r.OOMAdjustment == nil || r.OOMAdjustment.OOMRequestFloorBytes != 768*mib || len(finding(o.Classifications[0], FeatureOOMKilled).OOMKills) != 1 {
+			t.Fatalf("concurrent release erased a current OOM: %+v", r)
+		}
 	}
 }
 
@@ -366,4 +379,47 @@ func TestOOMCoverageStartFollowsCFSOnlyRollback(t *testing.T) {
 			t.Fatalf("coverage at %d, held=%v: %+v", tc.since, tc.held, mem)
 		}
 	}
+}
+
+func TestAmbiguousRetiredOOMAcrossGapCannotAuthorizeReduction(t *testing.T) {
+	in := fixture(7200, 60)
+	c := &in.Containers[0]
+	c.Identity.ReleaseStartInferred = true
+	c.Identity.ReleaseStartedAt = epoch + 30*60000
+	c.Identity.UsageStart = epoch + 60*60000
+	c.Inventory.CurrentPods = map[string]int64{"pod-1": epoch}
+	p := safetyPolicy(shortPolicy())
+	for _, tc := range []struct {
+		at   int64
+		held bool
+	}{{0, false}, {20, false}, {45, true}} {
+		c.OOMKills = nil
+		if tc.at != 0 {
+			k := oomKill("before-gap", epoch+tc.at*60000, 512*mib)
+			k.PodUID = "retired"
+			c.OOMKills = []OOMKill{k}
+		}
+		o := run(t, in, p)
+		mem := o.Results[0]
+		if has(mem.DataQuality, ReasonOOMCoverageIncomplete) != tc.held || (len(mem.Recommendations) == 0) != tc.held || len(mem.Evidence.OOMKills) != 0 || mem.OOMAdjustment != nil || len(o.Results[1].Recommendations) == 0 {
+			t.Fatalf("retired event at minute %d: %+v", tc.at, mem)
+		}
+	}
+}
+
+func TestPreRestartGrowthAndOOMStayInAdvisoryEpisodes(t *testing.T) {
+	in := growthInput(6, 512*mib, 1024*mib)
+	c := &in.Containers[0]
+	c.Inventory.CurrentPods = map[string]int64{"pod-1": epoch + 5*3600_000}
+	c.OOMKills = []OOMKill{oomKill("terminated", epoch+4*3600_000, 0)}
+	p := safetyPolicy(DefaultPolicy())
+	p.Classification = &ClassificationPolicy{}
+	o := run(t, in, p)
+	f := finding(o.Classifications[0], FeatureMemoryLeak)
+	for _, e := range f.MemoryLeak.Episodes {
+		if slices.Contains(e.OOMKillIDs, "terminated") && e.ObservedEnd < c.Inventory.CurrentPods["pod-1"] {
+			return
+		}
+	}
+	t.Fatalf("restart erased the terminated advisory episode: %+v", f)
 }

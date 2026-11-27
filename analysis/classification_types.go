@@ -3,7 +3,7 @@
 // See LICENSE and PUBLIC_SOURCE_LICENSE.
 package analysis
 
-const ClassificationDetectorVersion = "1"
+const ClassificationDetectorVersion = "2"
 
 // ClassificationPolicy enables advisory classification with versioned defaults.
 // It never changes resource sizing, OOM adjustments or sizing notices.

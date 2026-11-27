@@ -442,7 +442,7 @@ func analyzeResource(in Input, c ContainerObservation, r Resource, p Policy) (Re
 	}
 	downsizeSuppressed := false
 	memoryHoldReason := Reason("")
-	memoryGrowthEvaluated, memoryGrowthHeld := false, false
+	memoryGrowthEvaluated := false
 	limitHoldReason := Reason("")
 	for _, s := range []struct {
 		setting      Setting
@@ -530,7 +530,7 @@ func analyzeResource(in Input, c ContainerObservation, r Resource, p Policy) (Re
 			if !memoryGrowthEvaluated {
 				memoryGrowthEvaluated = true
 				var leak *MemoryLeakAnalysis
-				memoryGrowthHeld, leak = memoryGrowthHold(in, c, p, result)
+				memoryHoldReason, leak = memoryGrowthHold(in, c, p, result)
 				if p.Memory.LeakDetection != nil {
 					// Reused by Analyze for the explicit advisory display.
 					result.MemoryLeak = leak
@@ -539,13 +539,14 @@ func analyzeResource(in Input, c ContainerObservation, r Resource, p Policy) (Re
 			// Only a hold is traced. Unavailable, immature, stale, unverified, or
 			// fallback evidence does not prove that growth is absent, so no passing
 			// guard is recorded for it.
-			if memoryGrowthHeld {
-				settingTrace.guard("no ongoing mature memory growth", false, nil)
-				settingTrace.stop("retained", ReasonMemoryBaselineGrowth)
-				result.Notices = appendUniqueReason(result.Notices, ReasonMemoryBaselineGrowth)
-				if memoryHoldReason == "" {
-					memoryHoldReason = ReasonMemoryBaselineGrowth
+			if memoryHoldReason != "" {
+				if memoryHoldReason == ReasonMemoryBaselineGrowth {
+					settingTrace.guard("no ongoing mature memory growth", false, nil)
+				} else {
+					settingTrace.guard("continuous runtime known for rising memory baseline", false, nil)
 				}
+				settingTrace.stop("retained", memoryHoldReason)
+				result.Notices = appendUniqueReason(result.Notices, memoryHoldReason)
 				continue
 			}
 		}
@@ -803,6 +804,12 @@ func selectReleaseSegment(in Input, c ContainerObservation, reliability bool) (C
 		return c, c.Identity.ReleaseStartedAt
 	}
 	cutoff := in.WindowStart - 1
+	var currentSince int64
+	for uid, started := range c.Inventory.CurrentPods {
+		if uid != "" && c.Inventory.Available && started > 0 && started <= c.Inventory.Timestamp && (currentSince == 0 || started < currentSince) {
+			currentSince = started
+		}
+	}
 	rows := [][]Series{c.CPU.Series, c.Memory.Series}
 	if reliability && c.Classification != nil {
 		throttling := c.Classification.Throttling
@@ -814,7 +821,9 @@ func selectReleaseSegment(in Input, c ContainerObservation, reliability bool) (C
 				continue
 			}
 			for _, v := range s.Samples {
-				if v.Timestamp <= in.EvaluationTime && v.Timestamp > cutoff {
+				// A known current Pod was already serving this release. Concurrent
+				// older replicas are ordinary overlap, not an intervening activation.
+				if v.Timestamp <= in.EvaluationTime && v.Timestamp > cutoff && (currentSince == 0 || v.Timestamp < currentSince || v.Timestamp > c.Inventory.Timestamp) {
 					cutoff = v.Timestamp
 				}
 			}

@@ -13,31 +13,24 @@ import (
 // Select real terminations once per segment, before narrowing the usage window.
 func selectEvidence(in Input, c ContainerObservation, reliability bool) (ContainerObservation, error) {
 	c, currentPodStart := selectReleaseSegment(in, c, reliability)
-	if c.OOMCoverageStart > max(in.WindowStart, c.Identity.ReleaseStartedAt) {
+	activation := max(in.WindowStart, c.Identity.ReleaseStartedAt)
+	if c.OOMCoverageStart > activation {
 		c.OOMCoverageIncomplete = true
 	}
-	kills, err := selectOOMKills(in, c, currentPodStart)
-	c.OOMKills = kills
-	return c, err
-}
-
-// Select by event time, not observation freshness: a historical kill remains
-// relevant throughout the selected release segment, even after its pod is gone.
-func selectOOMKills(in Input, c ContainerObservation, currentPodStart int64) ([]OOMKill, error) {
 	var kills []OOMKill
 	seen := make(map[string]OOMKill)
 	for _, kill := range c.OOMKills {
 		if kill.Timestamp <= 0 {
-			return nil, fmt.Errorf("OOM kill timestamp must be positive Unix milliseconds")
+			return c, fmt.Errorf("OOM kill timestamp must be positive Unix milliseconds")
 		}
 		if kill.WorkloadUID == "" || kill.Release == "" {
-			return nil, fmt.Errorf("OOM kill workload UID and release are required")
+			return c, fmt.Errorf("OOM kill workload UID and release are required")
 		}
 		if kill.ID == "" {
-			return nil, fmt.Errorf("OOM kill ID is required")
+			return c, fmt.Errorf("OOM kill ID is required")
 		}
 		if !finite(kill.MemoryLimitBytes) || kill.MemoryLimitBytes < 0 {
-			return nil, fmt.Errorf("OOM kill memory limit must be finite and nonnegative")
+			return c, fmt.Errorf("OOM kill memory limit must be finite and nonnegative")
 		}
 		if previous, ok := seen[kill.ID]; ok {
 			// Two sources can observe the same termination with different
@@ -47,7 +40,7 @@ func selectOOMKills(in Input, c ContainerObservation, currentPodStart int64) ([]
 				previous.MemoryLimitBytes, kill.MemoryLimitBytes = known, known
 			}
 			if previous != kill {
-				return nil, fmt.Errorf("conflicting observations for OOM kill %q", kill.ID)
+				return c, fmt.Errorf("conflicting observations for OOM kill %q", kill.ID)
 			}
 			seen[kill.ID] = kill
 			continue
@@ -57,11 +50,19 @@ func selectOOMKills(in Input, c ContainerObservation, currentPodStart int64) ([]
 	for _, kill := range seen {
 		// Validate every supplied observation, including conflicts across the
 		// selection boundary, before deciding whether it affects this analysis.
-		start := max(in.WindowStart, c.Identity.ReleaseStartedAt, c.Identity.UsageStart)
-		if _, member := c.Inventory.CurrentPods[kill.PodUID]; member && kill.PodUID != "" {
-			start = max(in.WindowStart, currentPodStart)
+		if kill.Timestamp > in.EvaluationTime || kill.WorkloadUID != c.Target.WorkloadUID || kill.Release != c.Target.Release {
+			continue
 		}
-		if kill.Timestamp < start || kill.Timestamp > in.EvaluationTime || kill.WorkloadUID != c.Target.WorkloadUID || kill.Release != c.Target.Release {
+		start := activation
+		if _, current := c.Inventory.CurrentPods[kill.PodUID]; current && kill.PodUID != "" {
+			start = max(in.WindowStart, currentPodStart)
+		} else if kill.Timestamp >= activation && kill.Timestamp < c.Identity.UsageStart {
+			// The retired Pod cannot attest continuity across the gap. Its
+			// positive event prevents a cut but cannot establish a numeric floor.
+			c.OOMCoverageIncomplete = true
+			continue
+		}
+		if kill.Timestamp < start {
 			continue
 		}
 		kills = append(kills, kill)
@@ -72,7 +73,8 @@ func selectOOMKills(in Input, c ContainerObservation, currentPodStart int64) ([]
 		}
 		return kills[i].ID < kills[j].ID
 	})
-	return kills, nil
+	c.OOMKills = kills
+	return c, nil
 }
 
 func oomAdjustment(kills []OOMKill, baseline, currentBase, coefficient float64) (OOMAdjustment, error) {

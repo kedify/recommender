@@ -41,6 +41,7 @@ func previousReleaseUsage(in Input, c ContainerObservation, resource Resource, p
 		past.Identity.ReleaseStartInferred = false
 		past.Identity.RolloutBoundaryVerified = false
 		past.CPU.Series, past.Memory.Series = previous.CPU, previous.Memory
+		past.Inventory.CurrentPods = nil
 		past.OOMKills = nil
 		past, _ = selectReleaseSegment(pastIn, past, false)
 		obs := past.Memory

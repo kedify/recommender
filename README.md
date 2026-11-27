@@ -133,7 +133,8 @@ new limits. A verified current Pod's earlier OOM can predate a collector's first
 observation. A recorded activation or intervening rollout still excludes old
 events. After an inventory gap, `identity.usageStart` bounds usage, quota proof,
 historical fallback, and growth. A verified current Pod can attest an earlier
-OOM without reviving pre-gap usage or OOM events from retired Pods.
+OOM without reviving pre-gap usage. A retired Pod’s same-rollout OOM before
+an uncertain gap holds reductions without supplying a numeric floor.
 
 Saved patch reviews mark the four connected read-only checks as unperformed:
 Deployment target, revision, current resources, and freshness. Write permission,
@@ -298,7 +299,8 @@ absolute/relative growth, and trend consistency through `MemoryLeakPolicy`.
 Durations use seconds; zero fields select defaults. Policies must retain at least
 four buckets of minimum history and at most 256 buckets in the lookback, bounding the
 pairwise computation independently of the number of raw samples. P10 and the recent
-trend check are fixed parts of detector version `4`.
+trend check are fixed parts of the detector. Version `5` also splits episodes at
+verified runtime starts and retains pre-restart episodes for classification.
 
 Each memory result gains `memoryLeak`, including:
 
@@ -403,7 +405,8 @@ output, err := analysis.Analyze(snapshot, policy)
 `features` list and evidence for all eight detectors. Classification is disabled
 by default and never changes resource recommendations or sizing notices. The
 optional fields are additive to the existing input/output schemas; detector
-version `1` identifies the classification heuristics independently of sizing.
+version `2` identifies the rollout-scoped classification and runtime-aware
+memory episodes independently of sizing.
 
 Tags are `leader-election`, `high-variance-cpu`, `high-variance-memory`,
 `oom-killed`, `memory-leak`, `cpu-throttled`, `has-http-traffic`, and `has-metrics`.

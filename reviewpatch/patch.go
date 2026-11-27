@@ -147,6 +147,7 @@ func build(cluster, shard string, target analysis.Target, evaluatedAt int64, out
 		Target: target, EvaluatedAt: evaluatedAt, PolicyVersion: out.PolicyVersion, DetectorVersion: out.DetectorVersion,
 	}
 	evidence := make([]analysis.ResourceAnalysis, 0, 2)
+	var pairError error
 	for _, resource := range []analysis.Resource{analysis.ResourceCPU, analysis.ResourceMemory} {
 		result, err := findResult(out.Results, target, resource)
 		if err != nil {
@@ -156,6 +157,10 @@ func build(cluster, shard string, target analysis.Target, evaluatedAt int64, out
 			continue
 		}
 		evidence = append(evidence, *result)
+		identity := result.Evidence.Identity
+		if identity.Ambiguous || identity.WorkloadUID != "" && identity.WorkloadUID != target.WorkloadUID || identity.Release != "" && identity.Release != target.Release {
+			return Document{}, errors.New("current workload identity is unknown")
+		}
 		if reason := holds[resource]; reason != "" {
 			artifact.Holds = append(artifact.Holds, Hold{Resource: resource, Reason: reason})
 			continue
@@ -163,26 +168,36 @@ func build(cluster, shard string, target analysis.Target, evaluatedAt int64, out
 		if len(result.Recommendations) == 0 {
 			continue
 		}
-		identity := result.Evidence.Identity
-		if !identity.Available || identity.Ambiguous || identity.WorkloadUID != target.WorkloadUID || identity.Release != target.Release {
+		if !identity.Available || identity.WorkloadUID == "" || identity.Release == "" {
 			return Document{}, errors.New("current workload identity is unknown")
 		}
 		if !result.Evidence.CurrentRequest.Available || !result.Evidence.CurrentLimit.Available {
 			artifact.Holds = append(artifact.Holds, Hold{Resource: resource, Reason: "current request or limit is unknown"})
 			continue
 		}
-		if selected != "" && resource != selected {
-			continue
-		}
 		change, err := buildChange(*result)
 		if err != nil {
-			return Document{}, fmt.Errorf("%s: %w", resource, err)
+			var unsafe unsafePair
+			if !errors.As(err, &unsafe) {
+				return Document{}, fmt.Errorf("%s: %w", resource, err)
+			}
+			artifact.Holds = append(artifact.Holds, Hold{Resource: resource, Reason: unsafe.Error()})
+			if selected == "" || resource == selected {
+				pairError = fmt.Errorf("%s: %w", resource, err)
+			}
+			continue
+		}
+		if selected != "" && resource != selected {
+			continue
 		}
 		if !equal(change.Before.Request, change.After.Request) || !equal(change.Before.Limit, change.After.Limit) {
 			artifact.Changes = append(artifact.Changes, change)
 		}
 	}
 	if len(artifact.Changes) == 0 {
+		if pairError != nil {
+			return Document{}, pairError
+		}
 		return Document{}, errors.New("no eligible resource changes for the selected container")
 	}
 	var err error
@@ -322,15 +337,21 @@ func snapQuantity(kind analysis.Resource, value float64) float64 {
 	return value
 }
 
+// An authenticated pair can be unsafe to apply even when the independent
+// sibling resource has a valid change. Malformed evidence remains an error.
+type unsafePair string
+
+func (e unsafePair) Error() string { return string(e) }
+
 func validateChange(change Change) error {
 	if change.After.Request == nil && !equal(change.Before.Limit, change.After.Limit) {
-		return errors.New("a limit change with an unset request would change Pod request defaulting")
+		return unsafePair("a limit change with an unset request would change Pod request defaulting")
 	}
 	if change.After.Request != nil && change.After.Limit != nil && *change.After.Request > *change.After.Limit {
-		return errors.New("proposed request exceeds the resulting limit")
+		return unsafePair("proposed request exceeds the resulting limit")
 	}
 	if change.Before.Request == nil && change.Before.Limit != nil && *change.Before.Limit > 0 && change.After.Request != nil {
-		return errors.New("the effective request baseline may be inherited from the existing limit")
+		return unsafePair("the effective request baseline may be inherited from the existing limit")
 	}
 	return nil
 }

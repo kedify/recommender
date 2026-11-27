@@ -62,6 +62,8 @@ func classifyWorkload(in Input, c ContainerObservation, p Policy) (WorkloadClass
 			if len(kills) > 0 {
 				out.WindowStart = min(out.WindowStart, kills[0].Timestamp)
 				f.Status = ClassificationDetected
+			} else if c.OOMCoverageIncomplete {
+				f.Reasons = []string{string(ReasonOOMCoverageIncomplete)}
 			} else {
 				f.Reasons = []string{"no-supplied-oom-events"}
 			}

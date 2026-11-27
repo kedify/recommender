@@ -222,3 +222,20 @@ func TestSelectedResourceKeepsOriginalEvidenceAndPair(t *testing.T) {
 		t.Fatal("held CPU selection exported a sibling memory change")
 	}
 }
+
+func TestUnsafeInheritedSiblingPairBecomesALocalHold(t *testing.T) {
+	target, out := oomResult()
+	cpu := &out.Results[0]
+	cpu.Evidence = out.Results[1].Evidence
+	cpu.Evidence.CurrentRequest = analysis.Signal{Available: true, Unset: true}
+	cpu.Evidence.CurrentLimit = analysis.Signal{Available: true, Value: 1000}
+	cpu.Recommendations = []analysis.Recommendation{{Setting: analysis.SettingRequests, CurrentUnset: true, SuggestedValue: 500}}
+	doc, err := Build("cluster", "", target, 1234, out, nil)
+	if err != nil || doc.Verify() != nil || len(doc.Artifact.Changes) != 1 || doc.Artifact.Changes[0].Resource != analysis.ResourceMemory || len(doc.Artifact.Holds) != 1 || !strings.Contains(doc.Artifact.Holds[0].Reason, "inherited") {
+		t.Fatalf("unsafe sibling discarded memory: %+v %v", doc, err)
+	}
+	cpu.Evidence.Identity.WorkloadUID = "stale"
+	if _, err := Build("cluster", "", target, 1234, out, map[analysis.Resource]string{analysis.ResourceCPU: "owned by HPA"}); err == nil {
+		t.Fatal("external hold concealed a global identity mismatch")
+	}
+}
