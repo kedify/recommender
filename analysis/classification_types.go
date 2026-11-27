@@ -3,7 +3,7 @@
 // See LICENSE and PUBLIC_SOURCE_LICENSE.
 package analysis
 
-const ClassificationDetectorVersion = "1"
+const ClassificationDetectorVersion = "2"
 
 // ClassificationPolicy enables advisory classification with versioned defaults.
 // It never changes resource sizing, OOM adjustments or sizing notices.
@@ -32,8 +32,8 @@ const (
 )
 
 // ClassificationObservation contains optional, adapter-attributed evidence.
-// OOMKills here are classification-only and cannot affect sizing. Throttling
-// series hold raw cumulative counters with Kind=SampleGauge, never CPU usage.
+// With memory safety guards enabled, attributed OOMKills also inform sizing.
+// Throttling series hold raw cumulative counters with Kind=SampleGauge.
 // Only an explicit Policy.CPU.LimitReductionGuard may use verified positive
 // same-release throttling to hold a CPU limit reduction; it never sizes values.
 type ClassificationObservation struct {

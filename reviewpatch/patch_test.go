@@ -6,6 +6,7 @@ package reviewpatch
 
 import (
 	"encoding/json"
+	"slices"
 	"strings"
 	"testing"
 
@@ -169,5 +170,72 @@ func TestRequestWithInheritedLimitBaselineIsWithheld(t *testing.T) {
 	}
 	if _, err := Build("cluster", "", target, 1234, output, nil); err == nil || !strings.Contains(err.Error(), "baseline may be inherited") {
 		t.Fatalf("unexpected result: %v", err)
+	}
+}
+
+func TestUnknownCPUSettingDoesNotDiscardMemoryPair(t *testing.T) {
+	target, out := oomResult()
+	cpu := &out.Results[0]
+	cpu.Evidence = out.Results[1].Evidence
+	cpu.Evidence.CurrentLimit.Available = false
+	cpu.Recommendations = []analysis.Recommendation{{Setting: analysis.SettingRequests, CurrentValue: 1000, SuggestedValue: 250}}
+	doc, err := Build("cluster", "", target, 1234, out, nil)
+	if err != nil || doc.Verify() != nil || len(doc.Artifact.Holds) != 1 || doc.Artifact.Holds[0].Resource != analysis.ResourceCPU ||
+		len(doc.Artifact.Changes) != 1 || doc.Artifact.Changes[0].Resource != analysis.ResourceMemory ||
+		doc.Artifact.Changes[0].After.Request == nil || doc.Artifact.Changes[0].After.Limit == nil {
+		t.Fatalf("partial review: %+v %v", doc, err)
+	}
+	cpu.Evidence.Identity.WorkloadUID = "another"
+	if _, err = Build("cluster", "", target, 1234, out, nil); err == nil {
+		t.Fatal("global identity mismatch allowed partial export")
+	}
+}
+
+func TestOfflineChecksMatchConnectedReview(t *testing.T) {
+	want := []Check{{Name: "target", Status: Unperformed}, {Name: "revision", Status: Unperformed}, {Name: "currentResources", Status: Unperformed}, {Name: "freshness", Status: Unperformed}}
+	if got := UnperformedChecks(); !slices.Equal(want, got) {
+		t.Fatalf("offline review checks = %+v, want %+v", got, want)
+	}
+}
+
+func TestSelectedResourceKeepsOriginalEvidenceAndPair(t *testing.T) {
+	target, out := oomResult()
+	cpu := &out.Results[0]
+	cpu.Evidence = out.Results[1].Evidence
+	cpu.Evidence.CurrentRequest.Value = 500
+	cpu.Evidence.CurrentLimit.Value = 1000
+	cpu.Recommendations = []analysis.Recommendation{{Setting: analysis.SettingRequests, CurrentValue: 500, SuggestedValue: 100}}
+	both, err := Build("cluster", "", target, 1234, out, nil)
+	if err != nil || len(both.Artifact.Changes) != 2 {
+		t.Fatalf("full review: %+v %v", both, err)
+	}
+	mem, err := BuildForResource("cluster", "", target, 1234, out, nil, analysis.ResourceMemory)
+	if err != nil || mem.Verify() != nil || len(mem.Artifact.Changes) != 1 || mem.Artifact.Changes[0].Resource != analysis.ResourceMemory || mem.Artifact.EvidenceFingerprint != both.Artifact.EvidenceFingerprint {
+		t.Fatalf("selected review: %+v %v", mem, err)
+	}
+	cpu.Evidence.CurrentLimit.Available = false
+	mem, err = BuildForResource("cluster", "", target, 1234, out, nil, analysis.ResourceMemory)
+	if err != nil || len(mem.Artifact.Holds) != 1 || mem.Artifact.Holds[0].Resource != analysis.ResourceCPU {
+		t.Fatalf("lost sibling hold: %+v %v", mem, err)
+	}
+	if _, err := BuildForResource("cluster", "", target, 1234, out, nil, analysis.ResourceCPU); err == nil {
+		t.Fatal("held CPU selection exported a sibling memory change")
+	}
+}
+
+func TestUnsafeInheritedSiblingPairBecomesALocalHold(t *testing.T) {
+	target, out := oomResult()
+	cpu := &out.Results[0]
+	cpu.Evidence = out.Results[1].Evidence
+	cpu.Evidence.CurrentRequest = analysis.Signal{Available: true, Unset: true}
+	cpu.Evidence.CurrentLimit = analysis.Signal{Available: true, Value: 1000}
+	cpu.Recommendations = []analysis.Recommendation{{Setting: analysis.SettingRequests, CurrentUnset: true, SuggestedValue: 500}}
+	doc, err := Build("cluster", "", target, 1234, out, nil)
+	if err != nil || doc.Verify() != nil || len(doc.Artifact.Changes) != 1 || doc.Artifact.Changes[0].Resource != analysis.ResourceMemory || len(doc.Artifact.Holds) != 1 || !strings.Contains(doc.Artifact.Holds[0].Reason, "inherited") {
+		t.Fatalf("unsafe sibling discarded memory: %+v %v", doc, err)
+	}
+	cpu.Evidence.Identity.WorkloadUID = "stale"
+	if _, err := Build("cluster", "", target, 1234, out, map[analysis.Resource]string{analysis.ResourceCPU: "owned by HPA"}); err == nil {
+		t.Fatal("external hold concealed a global identity mismatch")
 	}
 }

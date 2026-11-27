@@ -10,6 +10,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"math"
+	"slices"
 	"sort"
 	"strings"
 )
@@ -149,6 +150,9 @@ func Analyze(in Input, p Policy) (Output, error) {
 		if c.Target.Namespace == "" || c.Target.Kind == "" || c.Target.Name == "" || c.Target.Container == "" {
 			return Output{}, fmt.Errorf("containers[%d]: target namespace, kind, name, and container are required", i)
 		}
+		if c.Identity.UsageStart < 0 || c.Identity.UsageStart > in.EvaluationTime || c.OOMCoverageStart < 0 || c.OOMCoverageStart > in.EvaluationTime {
+			return Output{}, fmt.Errorf("containers[%d]: invalid coverage start", i)
+		}
 		if c.Inventory.Eligible < 0 || c.Inventory.Observed < 0 || c.Inventory.Excluded < 0 {
 			return Output{}, fmt.Errorf("containers[%d]: negative inventory count", i)
 		}
@@ -158,17 +162,27 @@ func Analyze(in Input, p Policy) (Output, error) {
 		if i > 0 && targetKey(c.Target) == targetKey(containers[i-1].Target) {
 			return Output{}, fmt.Errorf("duplicate logical container target %q", targetKey(c.Target))
 		}
-		classificationContainer := c
-		c = selectReleaseSegment(in, c)
+		original := c
+		if p.Memory.SafetyGuards && c.Classification != nil {
+			// Once an adapter observes an identified OOM, sizing and classification
+			// use the same event. Event selection reconciles repeated snapshots.
+			c.OOMKills = slices.Concat(c.OOMKills, c.Classification.OOMKills)
+		}
+		c, err = selectEvidence(in, c, p.Memory.SafetyGuards || p.CPU.LimitReductionGuard != nil && p.CPU.LimitReductionGuard.RequireCompleteCoverage)
+		if err != nil {
+			return Output{}, fmt.Errorf("%s OOM evidence: %w", original.Target.Name, err)
+		}
+		usageIn := in
+		usageIn.WindowStart = max(in.WindowStart, c.Identity.UsageStart)
 		for _, r := range []Resource{ResourceMemory, ResourceCPU} {
-			result, err := analyzeResource(in, c, r, p)
+			result, err := analyzeResource(usageIn, c, r, p)
 			if err != nil {
 				return Output{}, fmt.Errorf("%s %s: %w", c.Target.Name, r, err)
 			}
 			if r == ResourceMemory && p.Memory.LeakDetection != nil {
 				// Memory safety guards may already have evaluated this explicit policy.
 				if result.MemoryLeak == nil {
-					result.MemoryLeak = analyzeMemoryLeak(in, c, p, result)
+					result.MemoryLeak = analyzeMemoryLeak(usageIn, c, p, result)
 				}
 				if result.MemoryLeak.Status == MemoryLeakPotential {
 					result.Notices = append(result.Notices, ReasonPotentialMemoryLeak)
@@ -177,7 +191,17 @@ func Analyze(in Input, p Policy) (Output, error) {
 			out.Results = append(out.Results, result)
 		}
 		if p.Classification != nil {
-			finding, err := classifyWorkload(in, classificationContainer, p)
+			if !p.Memory.SafetyGuards {
+				// Legacy classification selects its own segment from its broader inputs.
+				if original.Classification != nil {
+					original.OOMKills = slices.Concat(original.OOMKills, original.Classification.OOMKills)
+				}
+				c, err = selectEvidence(in, original, true)
+				if err != nil {
+					return Output{}, fmt.Errorf("%s classification: %w", original.Target.Name, err)
+				}
+			}
+			finding, err := classifyWorkload(usageIn, c, p)
 			if err != nil {
 				return Output{}, fmt.Errorf("%s classification: %w", c.Target.Name, err)
 			}
@@ -216,6 +240,7 @@ func analyzeResource(in Input, c ContainerObservation, r Resource, p Policy) (Re
 	requestTrace, limitTrace := &trace.Settings[0], &trace.Settings[1]
 	q := &result.DataQuality
 	identity := c.Identity
+	settingsStart := max(identity.ReleaseStartedAt, identity.UsageStart)
 	switch {
 	case identity.Ambiguous:
 		addReason(q, ReasonAmbiguousIdentity)
@@ -223,7 +248,7 @@ func analyzeResource(in Input, c ContainerObservation, r Resource, p Policy) (Re
 		addReason(q, ReasonMissingIdentity)
 	case identity.WorkloadUID != c.Target.WorkloadUID || identity.Release != c.Target.Release:
 		addReason(q, ReasonAmbiguousIdentity)
-	case stale(identity.Timestamp, in, p.Evidence) || identity.Timestamp < identity.ReleaseStartedAt:
+	case stale(identity.Timestamp, in, p.Evidence) || identity.Timestamp < settingsStart:
 		addReason(q, ReasonStaleIdentity)
 	}
 	if identity.ReleaseStartedAt <= 0 || identity.ReleaseStartedAt > in.EvaluationTime {
@@ -234,12 +259,30 @@ func analyzeResource(in Input, c ContainerObservation, r Resource, p Policy) (Re
 	if err != nil {
 		return ResourceAnalysis{}, err
 	}
+	if c.Inventory.CurrentPods != nil {
+		// The source may know the whole membership while this resource has
+		// samples for only a subset. Explanations report that intersection.
+		result.Evidence.Inventory.Observed = min(c.Inventory.Observed, observed)
+	}
+	var memoryFloor float64
 	if !identityBlocked && insufficientRolloutUsage(*q) {
+		currentSource := trace.Source
 		fallbackUsage, fallbackConfidence, fallbackQuality, fallback, fallbackErr := previousReleaseUsage(in, c, r, p, *q, trace)
 		if fallbackErr != nil {
 			return ResourceAnalysis{}, fallbackErr
 		}
 		if fallback != nil {
+			// Historical evidence can fill a short history, but cannot justify a
+			// limit below a verified peak already reached by this rollout.
+			if r == ResourceMemory && p.Memory.SafetyGuards && usage.Available {
+				memoryFloor = usage.Value * max(1, headroom)
+			}
+			if memoryFloor > 0 && usage.Value > fallbackUsage.Value {
+				requestTrace.step("current rollout memory peak floor", map[string]float64{"previousPeak": fallbackUsage.Value, "currentPeak": usage.Value})
+				trace.Source = currentSource
+				fallbackConfidence = min(fallbackConfidence, confidence)
+				fallbackUsage = usage
+			}
 			usage, confidence, *q = fallbackUsage, fallbackConfidence, fallbackQuality
 			result.RolloutFallback = fallback
 			result.Notices = append(result.Notices, ReasonPreviousReleaseUsage)
@@ -249,10 +292,7 @@ func analyzeResource(in Input, c ContainerObservation, r Resource, p Policy) (Re
 	usageBlocked := len(q.Reasons) > 0
 	oomLimitUnknown := false
 	if r == ResourceMemory {
-		kills, oomErr := selectOOMKills(in, c)
-		if oomErr != nil {
-			return ResourceAnalysis{}, oomErr
-		}
+		kills := c.OOMKills
 		result.Evidence.OOMKills = kills
 		if len(kills) > 0 {
 			result.Notices = append(result.Notices, ReasonOOMKillDetected)
@@ -278,7 +318,7 @@ func analyzeResource(in Input, c ContainerObservation, r Resource, p Policy) (Re
 		if !s.value.Available {
 			addReason(q, s.missing)
 			*s.ok = false
-		} else if stale(s.value.Timestamp, in, p.Evidence) || s.value.Timestamp < identity.ReleaseStartedAt {
+		} else if stale(s.value.Timestamp, in, p.Evidence) || s.value.Timestamp < settingsStart {
 			addReason(q, s.old)
 			*s.ok = false
 		}
@@ -291,15 +331,19 @@ func analyzeResource(in Input, c ContainerObservation, r Resource, p Policy) (Re
 	case !c.Inventory.Available:
 		addReason(q, ReasonUnknownInventory)
 		inventoryOK = false
-	case stale(c.Inventory.Timestamp, in, p.Evidence) || c.Inventory.Timestamp < identity.ReleaseStartedAt:
+	case stale(c.Inventory.Timestamp, in, p.Evidence) || c.Inventory.Timestamp < settingsStart:
 		addReason(q, ReasonStaleInventory)
 		inventoryOK = false
 	case c.Inventory.Excluded > 0:
 		addReason(q, ReasonExcludedContainers)
 		inventoryOK = false
-	case c.Inventory.Eligible <= 0 || c.Inventory.Observed != c.Inventory.Eligible || observed != c.Inventory.Eligible:
+	case c.Inventory.Eligible <= 0 || c.Inventory.CurrentPods != nil && len(c.Inventory.CurrentPods) != c.Inventory.Eligible || c.Inventory.Observed != c.Inventory.Eligible || observed != c.Inventory.Eligible:
 		addReason(q, ReasonIncompleteInventory)
 		inventoryOK = false
+	}
+	oomCoverageUnknown := r == ResourceMemory && p.Memory.SafetyGuards && c.OOMCoverageIncomplete
+	if oomCoverageUnknown {
+		addReason(q, ReasonOOMCoverageIncomplete)
 	}
 	if oomLimitUnknown {
 		addReason(q, ReasonOOMLimitUnknown)
@@ -343,14 +387,28 @@ func analyzeResource(in Input, c ContainerObservation, r Resource, p Policy) (Re
 	}
 	if !usageBlocked {
 		requestTrace.step("usage × headroom", map[string]float64{"usage": usage.Value, "coefficient": headroom, "candidate": rawSuggestedRequest})
+		if rawSuggestedRequest < memoryFloor {
+			requestTrace.step("current rollout peak minimum", map[string]float64{"before": rawSuggestedRequest, "candidate": memoryFloor})
+			rawSuggestedRequest = memoryFloor
+		}
 	} else {
 		confidence = 0 // There is no qualifying usage history to score.
-		latest := sizingKills[len(sizingKills)-1]
-		trace.Source = UsageSource{Release: c.Target.Release, PodUID: latest.PodUID, Timestamp: latest.Timestamp, Method: "OOM kill"}
+		source := sizingKills[len(sizingKills)-1]
+		if p.Memory.SafetyGuards {
+			for _, event := range sizingKills {
+				if event.MemoryLimitBytes >= source.MemoryLimitBytes {
+					source = event
+				}
+			}
+		}
+		trace.Source = UsageSource{Release: c.Target.Release, PodUID: source.PodUID, Timestamp: source.Timestamp, Method: "OOM kill"}
 		requestTrace.step("OOM sizing without usage history", nil)
 	}
 	if adjustment != nil {
 		result.OOMAdjustment = adjustment
+		if p.Memory.SafetyGuards {
+			memoryFloor = max(memoryFloor, adjustment.OOMRequestFloorBytes)
+		}
 		rawSuggestedRequest = math.Max(rawSuggestedRequest, adjustment.OOMRequestFloorBytes)
 		requestTrace.step("OOM floor", map[string]float64{"baseline": adjustment.BaselineRequestBytes, "floor": adjustment.OOMRequestFloorBytes, "candidate": rawSuggestedRequest, "coefficient": p.Memory.OOMKilledCoefficient})
 	}
@@ -384,7 +442,7 @@ func analyzeResource(in Input, c ContainerObservation, r Resource, p Policy) (Re
 	}
 	downsizeSuppressed := false
 	memoryHoldReason := Reason("")
-	memoryGrowthEvaluated, memoryGrowthHeld := false, false
+	memoryGrowthEvaluated := false
 	limitHoldReason := Reason("")
 	for _, s := range []struct {
 		setting      Setting
@@ -411,6 +469,11 @@ func analyzeResource(in Input, c ContainerObservation, r Resource, p Policy) (Re
 			}
 			continue
 		}
+		if s.suggested < memoryFloor && (s.suggested < s.current.Value || s.setting == SettingLimits && s.current.Value == 0) {
+			settingTrace.stop("retained", ReasonBounds)
+			boundsSuppressedAction = true
+			continue
+		}
 		if s.setting == SettingLimits {
 			retainedRequest := obs.CurrentRequest.Value
 			for _, rec := range result.Recommendations {
@@ -427,22 +490,22 @@ func analyzeResource(in Input, c ContainerObservation, r Resource, p Policy) (Re
 			}
 		}
 		if s.suggested < s.current.Value || (s.setting == SettingLimits && s.current.Value == 0) {
-			settingTrace.guard("safe reduction or introduction of limit", inventoryOK && !oomLimitUnknown, nil)
+			settingTrace.guard("safe reduction or introduction of limit", inventoryOK && !oomLimitUnknown && !oomCoverageUnknown, nil)
 		}
-		if (s.suggested < s.current.Value || (s.setting == SettingLimits && s.current.Value == 0)) && (!inventoryOK || oomLimitUnknown) {
+		if (s.suggested < s.current.Value || (s.setting == SettingLimits && s.current.Value == 0)) && (!inventoryOK || oomLimitUnknown || oomCoverageUnknown) {
 			for _, reason := range q.Reasons {
-				if reason == ReasonUnknownInventory || reason == ReasonStaleInventory || reason == ReasonIncompleteInventory || reason == ReasonExcludedContainers || reason == ReasonOOMLimitUnknown {
+				if reason == ReasonUnknownInventory || reason == ReasonStaleInventory || reason == ReasonIncompleteInventory || reason == ReasonExcludedContainers || reason == ReasonOOMLimitUnknown || reason == ReasonOOMCoverageIncomplete {
 					settingTrace.Reasons = append(settingTrace.Reasons, reason)
 				}
 			}
 			downsizeSuppressed = downsizeSuppressed || isMaterial(s.current, s.suggested, bounds)
 			continue
 		}
-		// Opt-in: hold only the final material reduction of a known finite CPU
-		// limit. Absent or untrustworthy counters never block and never prove zero.
+		// The strict policy also checks demand before introducing a CPU limit.
+		// An uncapped container does not need to establish CFS coverage.
 		// A held reduction keeps the current limit, which is above the suggested
 		// limit and therefore above any request recommended by this pass.
-		if r == ResourceCPU && s.setting == SettingLimits && p.CPU.LimitReductionGuard != nil && !s.current.Unset && s.current.Value > 0 && s.suggested < s.current.Value && isMaterial(s.current, s.suggested, bounds) {
+		if r == ResourceCPU && s.setting == SettingLimits && p.CPU.LimitReductionGuard != nil && (s.suggested < s.current.Value || p.CPU.LimitReductionGuard.RequireCompleteCoverage && s.current.Value == 0) && isMaterial(s.current, s.suggested, bounds) {
 			if held := cpuLimitReductionHold(in, c, obs, headroom, *p.CPU.LimitReductionGuard, float64(p.Evidence.FreshnessSeconds), s.suggested, settingTrace); len(held) > 0 {
 				settingTrace.stop("retained", held...)
 				for _, reason := range held {
@@ -467,7 +530,7 @@ func analyzeResource(in Input, c ContainerObservation, r Resource, p Policy) (Re
 			if !memoryGrowthEvaluated {
 				memoryGrowthEvaluated = true
 				var leak *MemoryLeakAnalysis
-				memoryGrowthHeld, leak = memoryGrowthHold(in, c, p, result)
+				memoryHoldReason, leak = memoryGrowthHold(in, c, p, result)
 				if p.Memory.LeakDetection != nil {
 					// Reused by Analyze for the explicit advisory display.
 					result.MemoryLeak = leak
@@ -476,13 +539,14 @@ func analyzeResource(in Input, c ContainerObservation, r Resource, p Policy) (Re
 			// Only a hold is traced. Unavailable, immature, stale, unverified, or
 			// fallback evidence does not prove that growth is absent, so no passing
 			// guard is recorded for it.
-			if memoryGrowthHeld {
-				settingTrace.guard("no ongoing mature memory growth", false, nil)
-				settingTrace.stop("retained", ReasonMemoryBaselineGrowth)
-				result.Notices = appendUniqueReason(result.Notices, ReasonMemoryBaselineGrowth)
-				if memoryHoldReason == "" {
-					memoryHoldReason = ReasonMemoryBaselineGrowth
+			if memoryHoldReason != "" {
+				if memoryHoldReason == ReasonMemoryBaselineGrowth {
+					settingTrace.guard("no ongoing mature memory growth", false, nil)
+				} else {
+					settingTrace.guard("continuous runtime known for rising memory baseline", false, nil)
 				}
+				settingTrace.stop("retained", memoryHoldReason)
+				result.Notices = appendUniqueReason(result.Notices, memoryHoldReason)
 				continue
 			}
 		}
@@ -522,7 +586,7 @@ func analyzeResource(in Input, c ContainerObservation, r Resource, p Policy) (Re
 	if len(result.Recommendations) == 0 {
 		if downsizeSuppressed {
 			for _, reason := range q.Reasons {
-				if reason == ReasonUnknownInventory || reason == ReasonStaleInventory || reason == ReasonIncompleteInventory || reason == ReasonExcludedContainers || reason == ReasonOOMLimitUnknown {
+				if reason == ReasonUnknownInventory || reason == ReasonStaleInventory || reason == ReasonIncompleteInventory || reason == ReasonExcludedContainers || reason == ReasonOOMLimitUnknown || reason == ReasonOOMCoverageIncomplete {
 					result.NoActionReason = reason
 					break
 				}
@@ -619,14 +683,16 @@ func normalizeUsage(in Input, c ContainerObservation, obs ResourceObservation, r
 		if pod == "" {
 			pod = s.ID
 		}
-		if !stale(timestamps[len(timestamps)-1], in, p.Evidence) {
+		last := timestamps[len(timestamps)-1]
+		runtimeStart, current := c.Inventory.CurrentPods[s.PodUID]
+		if (c.Inventory.CurrentPods == nil || s.PodUID != "" && current && last >= runtimeStart) && !stale(last, in, p.Evidence) {
 			pods[pod] = true
 		}
 		releaseTimes = append(releaseTimes, timestamps...)
 		n := len(timestamps)
 		q.SampleCount += n
 
-		first, last := timestamps[0], timestamps[n-1]
+		first := timestamps[0]
 		if q.ObservedStart == 0 || first < q.ObservedStart {
 			q.ObservedStart = first
 		}
@@ -732,23 +798,40 @@ func normalizeUsage(in Input, c ContainerObservation, obs ResourceObservation, r
 
 // selectReleaseSegment derives a conservative observed segment boundary when
 // the source has no activation event. Seeing B between two A runs excludes old A.
-func selectReleaseSegment(in Input, c ContainerObservation) ContainerObservation {
+func selectReleaseSegment(in Input, c ContainerObservation, reliability bool) (ContainerObservation, int64) {
+	if c.Identity.RolloutBoundaryVerified && c.Identity.ReleaseStartedAt > 0 {
+		// Other releases can still be serving Pods after the verified activation.
+		return c, c.Identity.ReleaseStartedAt
+	}
 	cutoff := in.WindowStart - 1
-	for _, obs := range []ResourceObservation{c.CPU, c.Memory} {
-		for _, s := range obs.Series {
+	var currentSince int64
+	for uid, started := range c.Inventory.CurrentPods {
+		if uid != "" && c.Inventory.Available && started > 0 && started <= c.Inventory.Timestamp && (currentSince == 0 || started < currentSince) {
+			currentSince = started
+		}
+	}
+	rows := [][]Series{c.CPU.Series, c.Memory.Series}
+	if reliability && c.Classification != nil {
+		throttling := c.Classification.Throttling
+		rows = append(rows, throttling.Periods, throttling.ThrottledPeriods, throttling.Seconds)
+	}
+	for _, series := range rows {
+		for _, s := range series {
 			if s.WorkloadUID != c.Target.WorkloadUID || s.Release == "" || s.Release == c.Target.Release {
 				continue
 			}
 			for _, v := range s.Samples {
-				if v.Timestamp <= in.EvaluationTime && v.Timestamp > cutoff {
+				// A known current Pod was already serving this release. Concurrent
+				// older replicas are ordinary overlap, not an intervening activation.
+				if v.Timestamp <= in.EvaluationTime && v.Timestamp > cutoff && (currentSince == 0 || v.Timestamp < currentSince || v.Timestamp > c.Inventory.Timestamp) {
 					cutoff = v.Timestamp
 				}
 			}
 		}
 	}
 	boundary := int64(0)
-	for _, obs := range []ResourceObservation{c.CPU, c.Memory} {
-		for _, s := range obs.Series {
+	for _, series := range rows {
+		for _, s := range series {
 			if s.WorkloadUID != c.Target.WorkloadUID || s.Release != c.Target.Release {
 				continue
 			}
@@ -765,6 +848,7 @@ func selectReleaseSegment(in Input, c ContainerObservation) ContainerObservation
 		if kill.WorkloadUID == c.Target.WorkloadUID && kill.Release == c.Target.Release && kill.Timestamp > cutoff && kill.Timestamp <= in.EvaluationTime && (boundary == 0 || kill.Timestamp < boundary) {
 			boundary = kill.Timestamp
 		}
+
 	}
 	if boundary == 0 && cutoff >= in.WindowStart {
 		boundary = cutoff + 1
@@ -773,8 +857,14 @@ func selectReleaseSegment(in Input, c ContainerObservation) ContainerObservation
 		c.Identity.ReleaseStartedAt = boundary
 		c.Identity.ReleaseStartInferred = true
 	} else if cutoff >= c.Identity.ReleaseStartedAt && boundary > c.Identity.ReleaseStartedAt {
+		c.Identity.RolloutBoundaryVerified = true
 		c.Identity.ReleaseStartedAt = boundary
 		c.Identity.ReleaseStartInferred = true
 	}
-	return c
+	// First collection cannot exclude a known current Pod's earlier event.
+	// Only a recorded activation or an intervening revision fences that event.
+	if c.Identity.ReleaseStartInferred && !c.Identity.RolloutBoundaryVerified {
+		return c, cutoff + 1
+	}
+	return c, c.Identity.ReleaseStartedAt
 }

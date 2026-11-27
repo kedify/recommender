@@ -81,7 +81,8 @@ func analyzeMemoryLeak(in Input, c ContainerObservation, p Policy, resource Reso
 		}
 		// analyzeResource already validated selected series and conflicting samples.
 		// Keep the first observed time before the leak lookback for warmup handling.
-		firstObserved := int64(0)
+		runtimeStart := c.Inventory.CurrentPods[s.PodUID]
+		firstObserved, firstCurrent := int64(0), int64(0)
 		var samples []Sample
 		for _, sample := range s.Samples {
 			if sample.Timestamp < max(in.WindowStart, c.Identity.ReleaseStartedAt) || sample.Timestamp > in.EvaluationTime {
@@ -89,6 +90,9 @@ func analyzeMemoryLeak(in Input, c ContainerObservation, p Policy, resource Reso
 			}
 			if firstObserved == 0 || sample.Timestamp < firstObserved {
 				firstObserved = sample.Timestamp
+			}
+			if sample.Timestamp >= runtimeStart && (firstCurrent == 0 || sample.Timestamp < firstCurrent) {
+				firstCurrent = sample.Timestamp
 			}
 			if sample.Timestamp >= start {
 				samples = append(samples, sample)
@@ -115,7 +119,18 @@ func analyzeMemoryLeak(in Input, c ContainerObservation, p Policy, resource Reso
 				clean = append(clean, sample)
 			}
 		}
-		for _, episode := range memoryLeakEpisodes(clean, s.PodUID, firstObserved, resource.Evidence.OOMKills, p.Evidence.FreshnessSeconds) {
+		kills := resource.Evidence.OOMKills
+		var episodes []memoryEpisode
+		if runtimeStart > firstObserved {
+			// A restart separates the live trend from earlier advisory episodes,
+			// including a terminated process that ended in an OOM.
+			cut := sort.Search(len(clean), func(i int) bool { return clean[i].Timestamp >= runtimeStart })
+			events := sort.Search(len(kills), func(i int) bool { return kills[i].Timestamp >= runtimeStart })
+			episodes = memoryLeakEpisodes(clean[:cut], s.PodUID, firstObserved, kills[:events], p.Evidence.FreshnessSeconds)
+			clean, kills, firstObserved = clean[cut:], kills[events:], firstCurrent
+		}
+		episodes = append(episodes, memoryLeakEpisodes(clean, s.PodUID, firstObserved, kills, p.Evidence.FreshnessSeconds)...)
+		for _, episode := range episodes {
 			evidence := analyzeMemoryEpisode(in, s, episode, start, p)
 			out.Episodes = append(out.Episodes, evidence)
 			switch evidence.Status {

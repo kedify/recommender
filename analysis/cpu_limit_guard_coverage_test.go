@@ -272,7 +272,12 @@ func TestStrictCPUCoverageUsesCurrentSegmentAfterRollback(t *testing.T) {
 	other.Release = "B"
 	other.Samples = other.Samples[6:7]
 	counter.Periods = append(counter.Periods, other)
-	strict := run(t, in, guardStrictPolicy()).Results[1]
+	policy := guardStrictPolicy()
+	// The current activation has four observations. Earlier A cannot
+	// contribute either its historical pressure or its usage coverage.
+	policy.Evidence.MinimumSamples = 4
+	policy.Evidence.MinimumHistorySeconds = 180
+	strict := run(t, in, policy).Results[1]
 	if _, ok := guardRecommendation(strict, SettingLimits); !ok {
 		t.Fatalf("old A pressure affected the new A segment: %+v", strict)
 	}
@@ -281,8 +286,8 @@ func TestStrictCPUCoverageUsesCurrentSegmentAfterRollback(t *testing.T) {
 		t.Fatalf("legacy pressure evidence changed: %+v", legacy)
 	}
 	in.Containers[0].Inventory.Timestamp = epoch + 6*60_000
-	strict = run(t, in, guardStrictPolicy()).Results[1]
-	if _, ok := guardRecommendation(strict, SettingLimits); ok || !guardHasReason(strict.Notices, ReasonCPULimitEvidenceIncomplete) {
+	strict = run(t, in, policy).Results[1]
+	if _, ok := guardRecommendation(strict, SettingLimits); ok || !guardHasReason(strict.DataQuality.Reasons, ReasonStaleInventory) {
 		t.Fatalf("inventory from before the current segment authorized reduction: %+v", strict)
 	}
 }

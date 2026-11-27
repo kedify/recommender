@@ -8,7 +8,7 @@ package analysis
 const (
 	InputSchemaVersion               = "resource-analysis-input/v2"
 	OutputSchemaVersion              = "resource-analysis-output/v3"
-	ResourceRightSizeDetectorVersion = "9"
+	ResourceRightSizeDetectorVersion = "10"
 	MaxPreviousReleases              = 3
 )
 
@@ -36,6 +36,11 @@ type ContainerObservation struct {
 	CPU            ResourceObservation        `json:"cpu"`
 	Memory         ResourceObservation        `json:"memory"`
 	OOMKills       []OOMKill                  `json:"oomKills,omitempty"`
+	// Failed or incomplete collection prevents decreases and new finite memory limits.
+	OOMCoverageIncomplete bool `json:"oomCoverageIncomplete,omitempty"`
+	// First instant of complete, uninterrupted OOM observation, in Unix ms.
+	// Earlier gaps only affect the selected rollout if they overlap its window.
+	OOMCoverageStart int64 `json:"oomCoverageStart,omitempty"`
 	// Newest first. Only the first three entries are eligible as fallback usage.
 	PreviousReleases []PreviousRelease `json:"previousReleases,omitempty"`
 }
@@ -80,6 +85,11 @@ type CurrentIdentity struct {
 	ReleaseStartedAt     int64  `json:"releaseStartedAt"`
 	Ambiguous            bool   `json:"ambiguous"`
 	ReleaseStartInferred bool   `json:"releaseStartInferred"`
+	// A recorded activation or intervening release fences events from a prior activation.
+	RolloutBoundaryVerified bool `json:"rolloutBoundaryVerified,omitempty"`
+	// First trustworthy usage observation after a collection gap, in Unix ms.
+	// A verified OOM on a current Pod can predate this coverage boundary.
+	UsageStart int64 `json:"usageStart,omitempty"`
 }
 
 // Counts refer to the selected UID/release/container. Observed is a distinct
@@ -90,6 +100,9 @@ type Inventory struct {
 	Eligible  int   `json:"eligible"`
 	Observed  int   `json:"observed"`
 	Excluded  int   `json:"excluded"`
+	// Exact current Pod UIDs and their observed running-container start times (Unix ms).
+	// Zero means the lifetime start is unknown. Absent in legacy observations.
+	CurrentPods map[string]int64 `json:"currentPods,omitzero"`
 }
 type ResourceObservation struct {
 	Series         []Series `json:"series"`
@@ -115,6 +128,9 @@ type Series struct {
 	// CPUGuardAdvisoryOnly excludes a retired runtime from current CPU proof.
 	// Its samples still inform sizing, rollback boundaries, and throttling history.
 	CPUGuardAdvisoryOnly bool `json:"cpuGuardAdvisoryOnly,omitempty"`
+	// Earliest CFS sample at the verified current quota, in Unix milliseconds.
+	// Earlier samples still describe this runtime's throttling history.
+	CPUGuardStart int64 `json:"cpuGuardStart,omitempty"`
 }
 type Sample struct {
 	Timestamp int64   `json:"timestamp"`

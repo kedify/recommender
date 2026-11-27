@@ -16,7 +16,7 @@ output, err := analysis.Analyze(snapshot, policy)
 
 Callers fetch raw range vectors and map them into `analysis.Input`; calculations
 and CPU counter normalization happen in this package. Input schema v2 rejects v1
-input; results use output schema v3 and resource detector version 9. Consumers
+input; results use output schema v3 and resource detector version 10. Consumers
 should update generated output bindings and invalidate cached findings when upgrading.
 All timestamps are original Unix milliseconds, including current settings and
 identity. Do not stamp carried-forward values with query evaluation times. CPU
@@ -118,6 +118,28 @@ reasons; an empty recommendation list always includes a no-action reason. Detect
 and normalized-policy identities are independent from schema versions. Consumers
 should pin a released module version and invalidate/recompute old findings.
 
+When an adapter supplies `inventory.currentPods`, the keys identify current Pods
+and the values give the running container start time in Unix milliseconds. A zero
+start preserves Pod identity while leaving the runtime unknown. Historical usage
+can inform the aggregate. Only fresh members of this snapshot establish current
+coverage. Strict CPU-limit proof requires aligned counters at the current applied
+quota and runtime. The adapter sets `cpuGuardStart` on full CFS series to bound proof to
+the verified quota segment while retaining historical classification evidence. New CPU limits require recurring demand to fit without requiring CFS
+counters from an uncapped container.
+
+With memory safety enabled, a shorter current rollout's observed peak floors a
+historical estimate. An incomplete OOM collection holds memory reductions and
+new limits. A verified current Pod's earlier OOM can predate a collector's first
+observation. A recorded activation or intervening rollout still excludes old
+events. After an inventory gap, `identity.usageStart` bounds usage, quota proof,
+historical fallback, and growth. A verified current Pod can attest an earlier
+OOM without reviving pre-gap usage. A retired Pod’s same-rollout OOM before
+an uncertain gap holds reductions without supplying a numeric floor.
+
+Saved patch reviews mark the four connected read-only checks as unperformed:
+Deployment target, revision, current resources, and freshness. Write permission,
+admission, and server-side dry run belong to the apply workflow.
+
 ## OOM observations
 
 Callers may supply `ContainerObservation.OOMKills` as normalized positive OOM
@@ -143,8 +165,8 @@ The adapter must establish the workload/release identity at the event time befor
 assigning it to this container. Use zero or omit `MemoryLimitBytes` when the
 event-time limit is unknown or unlimited; do not substitute today's limit.
 Repeated scrapes of one termination retain the same event ID and timestamp.
-Identical events are deduplicated; conflicting observations sharing an ID are
-rejected. All supplied observations are validated before filtering by time or
+Repeated observations of the same event merge a known and unknown limit.
+Conflicting identities, timestamps, or known limits are rejected. All supplied observations are validated before filtering by time or
 workload/release identity. Events are sorted deterministically and input is not mutated.
 
 Only events within the requested window and selected workload UID/release segment
@@ -277,7 +299,8 @@ absolute/relative growth, and trend consistency through `MemoryLeakPolicy`.
 Durations use seconds; zero fields select defaults. Policies must retain at least
 four buckets of minimum history and at most 256 buckets in the lookback, bounding the
 pairwise computation independently of the number of raw samples. P10 and the recent
-trend check are fixed parts of detector version `4`.
+trend check are fixed parts of the detector. Version `5` also splits episodes at
+verified runtime starts and retains pre-restart episodes for classification.
 
 Each memory result gains `memoryLeak`, including:
 
@@ -382,7 +405,8 @@ output, err := analysis.Analyze(snapshot, policy)
 `features` list and evidence for all eight detectors. Classification is disabled
 by default and never changes resource recommendations or sizing notices. The
 optional fields are additive to the existing input/output schemas; detector
-version `1` identifies the classification heuristics independently of sizing.
+version `2` identifies the rollout-scoped classification and runtime-aware
+memory episodes independently of sizing.
 
 Tags are `leader-election`, `high-variance-cpu`, `high-variance-memory`,
 `oom-killed`, `memory-leak`, `cpu-throttled`, `has-http-traffic`, and `has-metrics`.
@@ -390,7 +414,7 @@ A finding has `detected`, `not-detected`, `insufficient-data`, or `unavailable`
 status. An absent tag is not proof that the workload lacks that feature.
 
 Adapters may supply `ContainerObservation.Classification` with attributed Lease
-and endpoint observations, classification-only OOM kills, and raw CPU throttling
+and endpoint observations, attributed OOM kills, and raw CPU throttling
 counters. The analyzer performs no I/O. Lease/workload associations must come
 from verified ownership or unambiguous holder identity; merely sharing a
 namespace is insufficient. Endpoint observations must resolve the container.
@@ -407,8 +431,8 @@ latest supplied 24 hours, excludes five minutes of warmup, and requires at least
 30 minutes, 30 samples, and 70% coverage. A coefficient of variation of at least
 0.5 and P95−P5 spread of at least 50 millicores or 32 MiB earns the resource tag.
 Replicas and previous releases are never pooled. Memory-leak classification uses
-the existing leak detector and its defaults; classification-only OOM kills split
-leak episodes but do not participate in sizing.
+the existing leak detector and its defaults. Attributed OOM kills split leak
+episodes. With memory safety guards enabled, sizing also uses these events.
 
 Each evaluated variance series exposes `mean`, `standardDeviation`, and `variance`
 alongside `coefficientOfVariation` and `spread`. These are the time-weighted

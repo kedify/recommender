@@ -4,7 +4,7 @@
 
 package analysis
 
-const MemoryLeakDetectorVersion = "4"
+const MemoryLeakDetectorVersion = "5"
 
 // MemoryLeakPolicy enables an advisory heuristic, not a diagnosis. Zero fields
 // select defaults. Setting MemoryPolicy.LeakDetection to nil disables detection.
