@@ -323,17 +323,30 @@ func TestThrottlingAfterFastStartupScrapes(t *testing.T) {
 	}
 }
 
-func TestPressureDoesNotBridgeRepeatedOutages(t *testing.T) {
-	in := fixture(7200, 60)
-	counter := counterFixture(in, nil)
-	at := in.WindowStart
-	counter.Samples = append(counter.Samples, Sample{Timestamp: at})
-	for _, delay := range []int64{30, 30, 30, 30, 30, 30, 30, 600, 600, 1800} {
-		at += delay * 1000
-		counter.Samples = append(counter.Samples, Sample{at, float64(len(counter.Samples))})
-	}
-	intervals, err := counterIntervals(counter, in.WindowStart, in.EvaluationTime, true)
-	if err != nil || len(intervals) != 7 {
-		t.Fatalf("expected only the 30s intervals: %+v %v", intervals, err)
+func TestPressureDoesNotBridgeOutages(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		tail []int64
+		want int
+	}{
+		{"two long outages", []int64{600, 600, 1800}, 10},
+		{"two shorter outages", []int64{100, 100, 240}, 10},
+		{"increasing gaps", []int64{50, 85, 145, 250, 430, 740}, 12},
+		{"recovery after outage", []int64{150, 30, 30}, 12},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			in := fixture(7200, 60)
+			counter := counterFixture(in, nil)
+			at := in.WindowStart
+			counter.Samples = append(counter.Samples, Sample{Timestamp: at})
+			for _, gap := range append([]int64{30, 30, 30, 30, 30, 30, 30, 30, 30, 30}, tc.tail...) {
+				at += gap * 1000
+				counter.Samples = append(counter.Samples, Sample{at, float64(len(counter.Samples))})
+			}
+			intervals, err := counterIntervals(counter, in.WindowStart, in.EvaluationTime, true)
+			if err != nil || len(intervals) != tc.want {
+				t.Fatalf("expected %d valid intervals, got %+v, %v", tc.want, intervals, err)
+			}
+		})
 	}
 }

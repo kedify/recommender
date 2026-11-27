@@ -624,7 +624,7 @@ func isMaterial(current Signal, suggested float64, b Bounds) bool {
 
 // Allow bounded timestamp jitter without crediting an entire missed scrape or
 // extending the freshness, history, or observation-count requirements.
-const usageCoverageGapTolerance = 1.25
+const coverageGapTolerance = 1.25
 
 // A replica's percentile is computed separately; the largest replica result is
 // used for the shared container setting. History spans the current release across
@@ -733,7 +733,7 @@ func normalizeUsage(in Input, c ContainerObservation, obs ResourceObservation, r
 		// confidence from another replica with a lower aggregate.
 		seriesCovered := cadence
 		for _, gap := range gaps {
-			seriesCovered += math.Min(gap, cadence*usageCoverageGapTolerance)
+			seriesCovered += math.Min(gap, cadence*coverageGapTolerance)
 		}
 		seriesSpan := float64(last-first)/1000 + cadence
 		seriesCoverage := 0.0
@@ -771,7 +771,7 @@ func normalizeUsage(in Input, c ContainerObservation, obs ResourceObservation, r
 	covered := cadence
 	for i := 1; i < len(unique); i++ {
 		gap := float64(unique[i]-unique[i-1]) / 1000
-		covered += math.Min(gap, cadence*usageCoverageGapTolerance)
+		covered += math.Min(gap, cadence*coverageGapTolerance)
 	}
 	if in.EvaluationTime > start {
 		q.Coverage = math.Min(1, covered/(float64(in.EvaluationTime-start)/1000))

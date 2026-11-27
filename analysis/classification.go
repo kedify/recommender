@@ -263,16 +263,15 @@ func counterIntervals(s Series, start, end int64, allowSlowerCadence bool) ([]Co
 	for i := 1; i < len(values); i++ {
 		a, b := values[i-1], values[i]
 		delta := b.Value - a.Value
-		// Fast startup scrapes can dominate the window median after the Agent
-		// returns to its periodic interval. Two preceding gaps must support
-		// a slower cadence. A single outage cannot widen its own allowance.
-		baseline := cadence
+		maxGap := 3 * cadence
 		if allowSlowerCadence && i >= 3 {
-			// Bound the adjustment by the same three-cadence tolerance.
-			// Repeated outages cannot raise the baseline without limit.
-			baseline = max(baseline, min(3*cadence, gaps[i-2], gaps[i-3]))
+			// A slower periodic scrape can follow a burst of startup samples.
+			// Require two corroborating intervals and allow only scrape jitter
+			// around their cadence. Bound the adjustment after repeated outages.
+			recent := min(gaps[i-2], gaps[i-3])
+			maxGap = max(maxGap, min(3*maxGap, coverageGapTolerance*recent))
 		}
-		if delta < 0 || gaps[i-1] > 3*baseline {
+		if delta < 0 || gaps[i-1] > maxGap {
 			continue
 		}
 		out = append(out, CounterInterval{Start: a.Timestamp, End: b.Timestamp, Delta: delta})
