@@ -112,6 +112,9 @@ type Series struct {
 	Release     string     `json:"release"`
 	Kind        SampleKind `json:"kind"`
 	Samples     []Sample   `json:"samples"`
+	// CPUGuardAdvisoryOnly excludes a retired runtime from current CPU proof.
+	// Its samples still inform sizing, rollback boundaries, and throttling history.
+	CPUGuardAdvisoryOnly bool `json:"cpuGuardAdvisoryOnly,omitempty"`
 }
 type Sample struct {
 	Timestamp int64   `json:"timestamp"`

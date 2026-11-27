@@ -156,6 +156,9 @@ func TestCPULimitGuardStrictCoverageHoldsWithoutProof(t *testing.T) {
 			o := guardCFS(in)
 			o.Periods, o.ThrottledPeriods, o.Seconds = o.Periods[1:], o.ThrottledPeriods[1:], o.Seconds[1:]
 		}, false, false},
+		{"reset-at-latest-sample", func(in *Input, _ *Policy) {
+			guardCFS(in).Periods[0].Samples[10].Value = 0
+		}, false, false},
 		{"reset-inside-span", func(in *Input, _ *Policy) { guardCFS(in).Periods[0].Samples[9].Value = 0 }, false, false},
 		{"misaligned", func(in *Input, _ *Policy) {
 			s := &guardCFS(in).ThrottledPeriods[0]

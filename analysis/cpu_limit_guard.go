@@ -187,7 +187,7 @@ func strictRecurringCPUDemand(in Input, c ContainerObservation, obs ResourceObse
 	if c.Classification != nil && c.Classification.Throttling.SourceComplete {
 		throttling := c.Classification.Throttling
 		for _, series := range throttling.Periods {
-			if series.WorkloadUID != c.Target.WorkloadUID || series.Release != c.Target.Release ||
+			if series.CPUGuardAdvisoryOnly || series.WorkloadUID != c.Target.WorkloadUID || series.Release != c.Target.Release ||
 				!cpuCounterSeriesCurrent(series, start, in, freshnessSeconds, throttling.CoverageAt) {
 				continue
 			}
@@ -203,7 +203,7 @@ func strictRecurringCPUDemand(in Input, c ContainerObservation, obs ResourceObse
 	seen := make(map[string]bool)
 	var demand float64
 	for _, series := range obs.Series {
-		if series.WorkloadUID != c.Target.WorkloadUID || series.Release != c.Target.Release ||
+		if series.CPUGuardAdvisoryOnly || series.WorkloadUID != c.Target.WorkloadUID || series.Release != c.Target.Release ||
 			!cpuGuardSeriesFresh(series, start, in, freshnessSeconds) {
 			continue
 		}
@@ -358,6 +358,9 @@ func cpuGuardSeriesFresh(series Series, start int64, in Input, freshnessSeconds 
 }
 
 func cpuCounterSeriesCurrent(series Series, start int64, in Input, freshnessSeconds float64, coverageAt int64) bool {
+	if series.CPUGuardAdvisoryOnly {
+		return false
+	}
 	if coverageAt == 0 {
 		return cpuGuardSeriesFresh(series, start, in, freshnessSeconds)
 	}
@@ -386,7 +389,7 @@ func cpuThrottlingCoverage(in Input, c ContainerObservation, obs ResourceObserva
 	e.inventoryValid = true
 	expected := map[string]bool{}
 	for _, s := range obs.Series {
-		if s.WorkloadUID != c.Target.WorkloadUID || s.Release != c.Target.Release {
+		if s.CPUGuardAdvisoryOnly || s.WorkloadUID != c.Target.WorkloadUID || s.Release != c.Target.Release {
 			continue
 		}
 		values, err := NormalizeSamples(s, start, in.EvaluationTime)
@@ -447,7 +450,7 @@ func cpuThrottlingCoverage(in Input, c ContainerObservation, obs ResourceObserva
 		if !okP || !okT || !okS || p.ID != th.ID || p.ID != sec.ID {
 			continue
 		}
-		span, ok := cpuCoverageSpan(p, th, sec, start, in, freshnessSeconds)
+		span, ok := cpuCoverageSpan(p, th, sec, start, in, freshnessSeconds, throttling.CoverageAt)
 		if !ok {
 			continue
 		}
@@ -474,7 +477,7 @@ func cpuThrottlingCoverage(in Input, c ContainerObservation, obs ResourceObserva
 // positive period denominator, throttled periods <= periods, and finite
 // non-negative throttled seconds. It returns the paired deltas of exactly
 // those verified intervals.
-func cpuCoverageSpan(periods, throttled, seconds Series, start int64, in Input, freshnessSeconds float64) (cpuCoverageSpanTotals, bool) {
+func cpuCoverageSpan(periods, throttled, seconds Series, start int64, in Input, freshnessSeconds float64, coverageAt int64) (cpuCoverageSpanTotals, bool) {
 	type span struct{ start, end int64 }
 	p, err := CounterIntervals(periods, start, in.EvaluationTime)
 	if err != nil || len(p) < cpuCoverageMinIntervals {
@@ -493,8 +496,17 @@ func cpuCoverageSpan(periods, throttled, seconds Series, start int64, in Input, 
 	}
 	th, sec := index(throttled), index(seconds)
 	latest := p[len(p)-1]
-	if !cpuGuardFresh(latest.End, in, freshnessSeconds) {
+	if !cpuGuardFresh(latest.End, in, freshnessSeconds) || coverageAt != 0 && latest.End != coverageAt {
 		return cpuCoverageSpanTotals{}, false
+	}
+	// CounterIntervals omits resets and gaps. The proof must reach the newest
+	// observation in all three families, including a terminal reset or gap.
+	for _, series := range []Series{periods, throttled, seconds} {
+		if slices.ContainsFunc(series.Samples, func(sample Sample) bool {
+			return sample.Timestamp > latest.End && sample.Timestamp <= in.EvaluationTime
+		}) {
+			return cpuCoverageSpanTotals{}, false
+		}
 	}
 	var t cpuCoverageSpanTotals
 	next := latest.End
