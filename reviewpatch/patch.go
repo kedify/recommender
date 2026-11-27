@@ -121,7 +121,7 @@ func validLabel(value string) bool {
 // Build exports one regular container. The caller supplies holds established by
 // its source, such as a utilization autoscaler affecting the targeted resource.
 func Build(cluster, shard string, target analysis.Target, evaluatedAt int64, out *analysis.Output, holds map[analysis.Resource]string) (Document, error) {
-	return build(cluster, shard, target, evaluatedAt, out, holds, "")
+	return build(cluster, shard, target, evaluatedAt, out, holds, "", "")
 }
 
 // BuildForResource reviews the selected recommendation's request and limit as
@@ -130,18 +130,34 @@ func BuildForResource(cluster, shard string, target analysis.Target, evaluatedAt
 	if selected != analysis.ResourceCPU && selected != analysis.ResourceMemory {
 		return Document{}, errors.New("select cpu or memory for resource review")
 	}
-	return build(cluster, shard, target, evaluatedAt, out, holds, selected)
+	return build(cluster, shard, target, evaluatedAt, out, holds, selected, "")
 }
 
-func build(cluster, shard string, target analysis.Target, evaluatedAt int64, out *analysis.Output, holds map[analysis.Resource]string, selected analysis.Resource) (Document, error) {
+// BuildForSetting changes just the selected request or limit and validates it
+// against the unchanged sibling. Its evidence fingerprint includes both resources.
+func BuildForSetting(cluster, shard string, target analysis.Target, evaluatedAt int64, out *analysis.Output, holds map[analysis.Resource]string, resource analysis.Resource, setting analysis.Setting) (Document, error) {
+	if resource != analysis.ResourceCPU && resource != analysis.ResourceMemory || setting != analysis.SettingRequests && setting != analysis.SettingLimits {
+		return Document{}, errors.New("select a CPU or memory request or limit")
+	}
+	return build(cluster, shard, target, evaluatedAt, out, holds, resource, setting)
+}
+
+func build(cluster, shard string, target analysis.Target, evaluatedAt int64, out *analysis.Output, holds map[analysis.Resource]string, selected analysis.Resource, setting analysis.Setting) (Document, error) {
 	if err := ValidateTarget(target); err != nil {
 		return Document{}, err
 	}
 	if strings.TrimSpace(cluster) == "" || evaluatedAt <= 0 || out == nil ||
-		out.PolicyVersion == "" || out.DetectorVersion == "" || out.SchemaVersion != analysis.OutputSchemaVersion {
+		out.PolicyVersion == "" || out.DetectorVersion == "" {
 		return Document{}, errors.New("review requires cluster scope, evaluation time and versioned analysis")
 	}
 
+	expectedSchema := analysis.OutputSchemaVersion
+	if out.EffectivePolicy.CPU.ExistingLimitsOnly {
+		expectedSchema = analysis.ExistingCPULimitsOutputSchemaVersion
+	}
+	if out.SchemaVersion != expectedSchema {
+		return Document{}, errors.New("unsupported analysis schema for the recorded sizing policy")
+	}
 	artifact := Artifact{
 		SchemaVersion: SchemaVersion, Cluster: cluster, Shard: shard, APIVersion: "apps/v1", PatchType: StrategicMergePatch,
 		Target: target, EvaluatedAt: evaluatedAt, PolicyVersion: out.PolicyVersion, DetectorVersion: out.DetectorVersion,
@@ -175,7 +191,11 @@ func build(cluster, shard string, target analysis.Target, evaluatedAt int64, out
 			artifact.Holds = append(artifact.Holds, Hold{Resource: resource, Reason: "current request or limit is unknown"})
 			continue
 		}
-		change, err := buildChange(*result)
+		var selectedSetting analysis.Setting
+		if resource == selected {
+			selectedSetting = setting
+		}
+		change, err := buildChange(*result, selectedSetting)
 		if err != nil {
 			var unsafe unsafePair
 			if !errors.As(err, &unsafe) {
@@ -231,7 +251,7 @@ func findResult(results []analysis.ResourceAnalysis, target analysis.Target, res
 	return selected, nil
 }
 
-func buildChange(result analysis.ResourceAnalysis) (Change, error) {
+func buildChange(result analysis.ResourceAnalysis, selected analysis.Setting) (Change, error) {
 	request, err := currentValue(result.Resource, result.Evidence.CurrentRequest)
 	if err != nil {
 		return Change{}, err
@@ -258,14 +278,18 @@ func buildChange(result analysis.ResourceAnalysis) (Change, error) {
 			if !matchesRecommendation(result.Resource, request, row) {
 				return Change{}, errors.New("request recommendation baseline differs from evidence")
 			}
-			change.After.Request = &value
-			change.RequestWhy = reasons(result, row.Setting)
+			if selected == "" || selected == analysis.SettingRequests {
+				change.After.Request = &value
+				change.RequestWhy = reasons(result, row.Setting)
+			}
 		case analysis.SettingLimits:
 			if !matchesRecommendation(result.Resource, limit, row) {
 				return Change{}, errors.New("limit recommendation baseline differs from evidence")
 			}
-			change.After.Limit = &value
-			change.LimitWhy = reasons(result, row.Setting)
+			if selected == "" || selected == analysis.SettingLimits {
+				change.After.Limit = &value
+				change.LimitWhy = reasons(result, row.Setting)
+			}
 		default:
 			return Change{}, errors.New("unsupported recommendation setting")
 		}

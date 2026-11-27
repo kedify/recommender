@@ -6,10 +6,11 @@
 package analysis
 
 const (
-	InputSchemaVersion               = "resource-analysis-input/v2"
-	OutputSchemaVersion              = "resource-analysis-output/v3"
-	ResourceRightSizeDetectorVersion = "11"
-	MaxPreviousReleases              = 3
+	InputSchemaVersion                   = "resource-analysis-input/v2"
+	OutputSchemaVersion                  = "resource-analysis-output/v3"
+	ExistingCPULimitsOutputSchemaVersion = "resource-analysis-output/v4"
+	ResourceRightSizeDetectorVersion     = "11"
+	MaxPreviousReleases                  = 3
 )
 
 // All timestamps are Unix milliseconds. Observation timestamps retain the source
@@ -181,6 +182,10 @@ type Bounds struct {
 	MinimumRelativeChange float64 `json:"minimumRelativeChange"`
 }
 type CPUPolicy struct {
+	// ExistingLimitsOnly adds secondary advice for verified finite caps to a
+	// requests-only strategy. Older readers retain requests-only behavior.
+	ExistingLimitsOnly bool `json:"existingLimitsOnly,omitempty"`
+
 	// Nil disables the CPU limit reduction guard, so omitted or older policies
 	// keep their policy version and results.
 	LimitReductionGuard *CPULimitReductionGuardPolicy `json:"limitReductionGuard,omitempty"`

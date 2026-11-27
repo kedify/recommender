@@ -239,3 +239,37 @@ func TestUnsafeInheritedSiblingPairBecomesALocalHold(t *testing.T) {
 		t.Fatal("external hold concealed a global identity mismatch")
 	}
 }
+
+func TestBuildForSettingKeepsOriginalEvidenceAndValidatesRetainedSibling(t *testing.T) {
+	target, out := oomResult()
+	pair, err := BuildForResource("cluster", "", target, 1234, out, nil, analysis.ResourceMemory)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := BuildForSetting("cluster", "", target, 1234, out, nil, analysis.ResourceMemory, analysis.SettingRequests); err == nil || !strings.Contains(err.Error(), "exceeds the resulting limit") {
+		t.Fatalf("request-only selection exceeded current memory cap: %v", err)
+	}
+	limit, err := BuildForSetting("cluster", "", target, 1234, out, nil, analysis.ResourceMemory, analysis.SettingLimits)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(limit.Artifact.Patch), "requests") || limit.Artifact.EvidenceFingerprint != pair.Artifact.EvidenceFingerprint {
+		t.Fatalf("single limit patch or evidence changed: %+v", limit.Artifact)
+	}
+}
+
+func TestExistingCPUOutputCannotBeExportedAsLegacyPolicy(t *testing.T) {
+	target, out := oomResult()
+	out.EffectivePolicy.CPU.RequestsOnly, out.EffectivePolicy.CPU.ExistingLimitsOnly = true, true
+	if _, err := Build("cluster", "", target, 1234, out, nil); err == nil {
+		t.Fatal("legacy output claimed existing-cap policy")
+	}
+	out.SchemaVersion = analysis.ExistingCPULimitsOutputSchemaVersion
+	if _, err := Build("cluster", "", target, 1234, out, nil); err != nil {
+		t.Fatal(err)
+	}
+	out.EffectivePolicy.CPU.ExistingLimitsOnly = false
+	if _, err := Build("cluster", "", target, 1234, out, nil); err == nil {
+		t.Fatal("unknown policy exported existing-cap output")
+	}
+}
