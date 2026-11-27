@@ -265,3 +265,50 @@ func TestEndpointClassificationNeedsNoUsageHistory(t *testing.T) {
 		t.Fatal("endpoint classification depended on utilization history")
 	}
 }
+
+func TestThrottlingAfterFastStartupScrapes(t *testing.T) {
+	in := fixture(3600, 20)
+	periods := counterFixture(in, nil)
+	throttled := counterFixture(in, nil)
+	seconds := counterFixture(in, nil)
+	at := in.EvaluationTime - 162000
+	var total, limited, duration float64
+	add := func(gap, newPeriods, limitedPeriods, blockedSeconds float64) {
+		at += int64(gap * 1000)
+		total += newPeriods
+		limited += limitedPeriods
+		duration += blockedSeconds
+		periods.Samples = append(periods.Samples, Sample{at, total})
+		throttled.Samples = append(throttled.Samples, Sample{at, limited})
+		seconds.Samples = append(seconds.Samples, Sample{at, duration})
+	}
+	add(0, 0, 0, 0)
+	for range 7 {
+		add(6, 60, 0, 0)
+	}
+	for range 4 {
+		add(30, 300, 278, 7)
+	}
+	in.Containers[0].Classification = &ClassificationObservation{Throttling: CPUThrottlingObservation{
+		Periods: []Series{periods}, ThrottledPeriods: []Series{throttled}, Seconds: []Series{seconds},
+	}}
+	f := finding(classified(t, in), FeatureCPUThrottled)
+	if f.Status != ClassificationDetected || len(f.Throttling) != 1 {
+		t.Fatalf("periodic throttling after startup: %+v", f)
+	}
+	e := f.Throttling[0]
+	if e.ObservedIntervals != 9 || e.ObservedSeconds != 102 || e.ThrottledSeconds == nil || *e.ThrottledSeconds != 14 || e.ThrottledPeriods == nil || *e.ThrottledPeriods != 556 {
+		t.Fatalf("expected seven fast and two corroborated periodic intervals: %+v", e)
+	}
+	// A missing scrape window after the transition cannot certify new deltas.
+	in.EvaluationTime += 150000
+	add(150, 1500, 1000, 50)
+	intervals, err := counterIntervals(seconds, in.WindowStart, in.EvaluationTime, true)
+	if err != nil || len(intervals) != 9 || intervals[len(intervals)-1].End == at {
+		t.Fatalf("gap after the cadence change: %+v %v", intervals, err)
+	}
+	strict, err := CounterIntervals(seconds, in.WindowStart, in.EvaluationTime)
+	if err != nil || len(strict) != 7 {
+		t.Fatalf("slower-cadence observations certified a limit cut: %+v %v", strict, err)
+	}
+}

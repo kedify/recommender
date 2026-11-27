@@ -280,7 +280,7 @@ func cpuQuotaPressure(in Input, c ContainerObservation, freshnessSeconds float64
 			if currentOnly {
 				since = max(since, c.Inventory.CurrentPods[s.PodUID], s.CPUGuardStart)
 			}
-			intervals, err := CounterIntervals(s, since, in.EvaluationTime)
+			intervals, err := counterIntervals(s, since, in.EvaluationTime, true)
 			if err != nil || len(intervals) == 0 {
 				continue
 			}

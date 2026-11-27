@@ -241,7 +241,15 @@ type CounterInterval struct {
 	Delta      float64
 }
 
+// CounterIntervals preserves the window-wide cadence check used to certify
+// coverage for a CPU limit reduction.
 func CounterIntervals(s Series, start, end int64) ([]CounterInterval, error) {
+	return counterIntervals(s, start, end, false)
+}
+
+// Pressure observations can also use a sustained local cadence. They may hold
+// a cut, but cannot establish the complete coverage needed to approve one.
+func counterIntervals(s Series, start, end int64, allowSlowerCadence bool) ([]CounterInterval, error) {
 	if s.Kind != SampleGauge {
 		return nil, fmt.Errorf("throttling counters must use raw gauge samples")
 	}
@@ -249,12 +257,20 @@ func CounterIntervals(s Series, start, end int64) ([]CounterInterval, error) {
 	if err != nil {
 		return nil, err
 	}
-	cadence := medianFloat(sampleGaps(values))
+	gaps := sampleGaps(values)
+	cadence := medianFloat(gaps)
 	out := make([]CounterInterval, 0, max(0, len(values)-1))
 	for i := 1; i < len(values); i++ {
 		a, b := values[i-1], values[i]
 		delta := b.Value - a.Value
-		if delta < 0 || float64(b.Timestamp-a.Timestamp)/1000 > 3*cadence {
+		// Fast startup scrapes can dominate the window median after the Agent
+		// returns to its periodic interval. Two preceding gaps must support
+		// a slower cadence. A single outage cannot widen its own allowance.
+		baseline := cadence
+		if allowSlowerCadence && i >= 3 {
+			baseline = max(baseline, min(gaps[i-2], gaps[i-3]))
+		}
+		if delta < 0 || gaps[i-1] > 3*baseline {
 			continue
 		}
 		out = append(out, CounterInterval{Start: a.Timestamp, End: b.Timestamp, Delta: delta})
@@ -301,13 +317,14 @@ func classifyThrottling(in Input, c ContainerObservation, obs CPUThrottlingObser
 					e.PodUID = s.PodUID
 				}
 				var err error
-				intervals[i], err = CounterIntervals(s, max(in.WindowStart, c.Identity.ReleaseStartedAt), in.EvaluationTime)
+				intervals[i], err = counterIntervals(s, max(in.WindowStart, c.Identity.ReleaseStartedAt), in.EvaluationTime, true)
 				if err != nil {
 					return f, err
 				}
 			}
 		}
 		if len(intervals[0]) > 0 {
+			e.ObservedIntervals = len(intervals[0])
 			seconds := 0.0
 			for _, v := range intervals[0] {
 				seconds += v.Delta
