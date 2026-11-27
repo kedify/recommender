@@ -374,16 +374,16 @@ func cpuCounterSeriesCurrent(series Series, start int64, in Input, freshnessSeco
 // joins are map lookups; nothing is compared pairwise.
 func cpuThrottlingCoverage(in Input, c ContainerObservation, obs ResourceObservation, freshnessSeconds float64) cpuThrottlingCoverageEvidence {
 	inv := c.Inventory
+	start := max(in.WindowStart, c.Identity.ReleaseStartedAt)
 	e := cpuThrottlingCoverageEvidence{eligiblePods: inv.Eligible}
 	if c.Classification == nil || !c.Classification.Throttling.SourceComplete {
 		return e
 	}
 	e.sourceComplete = true
-	if c.Target.WorkloadUID == "" || c.Target.Release == "" || !inv.Available || inv.Eligible <= 0 || inv.Observed != inv.Eligible || inv.Excluded != 0 || !cpuGuardFresh(inv.Timestamp, in, freshnessSeconds) {
+	if c.Target.WorkloadUID == "" || c.Target.Release == "" || !inv.Available || inv.Eligible <= 0 || inv.Observed != inv.Eligible || inv.Excluded != 0 || inv.Timestamp < start || !cpuGuardFresh(inv.Timestamp, in, freshnessSeconds) {
 		return e
 	}
 	e.inventoryValid = true
-	start := max(in.WindowStart, c.Identity.ReleaseStartedAt)
 	expected := map[string]bool{}
 	for _, s := range obs.Series {
 		if s.WorkloadUID != c.Target.WorkloadUID || s.Release != c.Target.Release {

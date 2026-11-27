@@ -267,7 +267,7 @@ func TestStrictCPUCoverageUsesCurrentSegmentAfterRollback(t *testing.T) {
 	}
 	other := guardFamily("intervening", "other-pod", guardRamp(11, 100))
 	other.Release = "B"
-	other.Samples = other.Samples[4:5]
+	other.Samples = other.Samples[6:7]
 	counter.Periods = append(counter.Periods, other)
 	strict := run(t, in, guardStrictPolicy()).Results[1]
 	if _, ok := guardRecommendation(strict, SettingLimits); !ok {
@@ -276,6 +276,11 @@ func TestStrictCPUCoverageUsesCurrentSegmentAfterRollback(t *testing.T) {
 	legacy := run(t, in, guardTestPolicy()).Results[1]
 	if !guardHasReason(legacy.Notices, ReasonCPUThrottlingPressure) {
 		t.Fatalf("legacy pressure evidence changed: %+v", legacy)
+	}
+	in.Containers[0].Inventory.Timestamp = epoch + 6*60_000
+	strict = run(t, in, guardStrictPolicy()).Results[1]
+	if _, ok := guardRecommendation(strict, SettingLimits); ok || !guardHasReason(strict.Notices, ReasonCPULimitEvidenceIncomplete) {
+		t.Fatalf("inventory from before the current segment authorized reduction: %+v", strict)
 	}
 }
 
