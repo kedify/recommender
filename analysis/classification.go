@@ -82,7 +82,7 @@ func classifyWorkload(in Input, c ContainerObservation, p Policy) (WorkloadClass
 			noOOM.OOMKills = nil
 			qualityPolicy := lp
 			qualityPolicy.Memory.SafetyGuards = false
-			resource, err := analyzeResource(in, noOOM, ResourceMemory, qualityPolicy)
+			resource, err := analyzeResource(in, noOOM, ResourceMemory, qualityPolicy, c.Identity.ReleaseStartedAt)
 			if err != nil {
 				return out, err
 			}

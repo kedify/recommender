@@ -52,8 +52,8 @@ type CPULimitReductionGuardPolicy struct {
 	RecurringSamples int `json:"recurringSamples"`
 	// RequireCompleteCoverage makes the guard strict: a reduction proceeds only
 	// with credible recurring demand and fresh, aligned same-release CFS proof
-	// for every current eligible Pod; anything missing holds it. False keeps the
-	// legacy behavior exactly.
+	// for every current eligible Pod; anything missing holds it. Existing-only
+	// cap advice always requires this proof, independently of the primary policy.
 	RequireCompleteCoverage bool `json:"requireCompleteCoverage,omitempty"`
 }
 
@@ -70,8 +70,18 @@ func normalizeCPULimitReductionGuard(g CPULimitReductionGuardPolicy) (CPULimitRe
 // cpuLimitChangeHold runs the two independent checks and returns the reasons
 // that hold the candidate. Demand cannot see quota-suppressed demand, and
 // throttling cannot see uncapped demand, so neither substitutes for the other.
-func cpuLimitChangeHold(in Input, c ContainerObservation, obs ResourceObservation, policy CPUPolicy, freshnessSeconds float64, candidate float64, trace *SettingTrace) []Reason {
+func cpuLimitChangeHold(in Input, c ContainerObservation, capReleaseStart int64, policy CPUPolicy, freshnessSeconds float64, candidate float64, trace *SettingTrace) []Reason {
 	g := *policy.LimitReductionGuard
+	if policy.ExistingLimitsOnly {
+		if capReleaseStart > c.Identity.ReleaseStartedAt {
+			trace.guard("sized request belongs to the verified CPU quota release", false, map[string]float64{
+				"sizingReleaseStart": float64(c.Identity.ReleaseStartedAt), "verifiedReleaseStart": float64(capReleaseStart),
+			})
+			return []Reason{ReasonCPULimitEvidenceIncomplete}
+		}
+		g.RequireCompleteCoverage = true
+	}
+	obs := c.CPU
 	headroom := policy.HeadroomCoefficient
 	var cov cpuThrottlingCoverageEvidence
 	if g.RequireCompleteCoverage && obs.CurrentLimit.Value > 0 {
@@ -450,7 +460,7 @@ func cpuThrottlingCoverage(in Input, c ContainerObservation, obs ResourceObserva
 		return e
 	}
 	e.sourceComplete = true
-	if c.Target.WorkloadUID == "" || c.Target.Release == "" || !inv.Available || inv.Eligible <= 0 || inv.Observed != inv.Eligible || inv.Excluded != 0 || inv.Timestamp < start || !cpuGuardFresh(inv.Timestamp, in, freshnessSeconds) {
+	if c.Target.WorkloadUID == "" || c.Target.Release == "" || !inv.Available || inv.Eligible <= 0 || inv.Observed != inv.Eligible || inv.Excluded != 0 || inv.CurrentPods != nil && len(inv.CurrentPods) != inv.Eligible || inv.Timestamp < start || !cpuGuardFresh(inv.Timestamp, in, freshnessSeconds) {
 		return e
 	}
 	e.inventoryValid = true

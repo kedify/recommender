@@ -80,6 +80,7 @@ func TestExistingCPULimitsPreservePrimarySizingAndGuardEstimates(t *testing.T) {
 		{"stale cap", func(c *ContainerObservation) { c.CPU.CurrentLimit.Timestamp = epoch }, true, 0, ReasonStaleLimit},
 		{"old collector without applied quota", func(c *ContainerObservation) { c.Classification.Throttling.Seconds[0].CPUGuardStart = 0 }, true, 0, ReasonCPULimitEvidenceIncomplete},
 		{"old collector without current runtime", func(c *ContainerObservation) { c.Inventory.CurrentPods = nil }, true, 0, ReasonCPULimitEvidenceIncomplete},
+		{"extra current Pod without measurements", func(c *ContainerObservation) { c.Inventory.CurrentPods["unmeasured"] = epoch }, true, 0, ReasonCPULimitEvidenceIncomplete},
 		{"missing denominator", func(c *ContainerObservation) { c.Classification.Throttling.Periods = nil }, true, 0, ReasonCPULimitEvidenceIncomplete},
 		{"unavailable source", func(c *ContainerObservation) { c.Classification.Throttling.SourceComplete = false }, true, 0, ReasonCPULimitEvidenceIncomplete},
 		{"new quota has only one sample", func(c *ContainerObservation) {
@@ -109,13 +110,43 @@ func TestExistingCPULimitsPreservePrimarySizingAndGuardEstimates(t *testing.T) {
 			if has != (tc.want > 0) || cap.SuggestedValue != tc.want || tc.reason != "" && !slices.Contains(trace.Reasons, tc.reason) {
 				t.Fatalf("cap=%+v, trace=%+v", cap, trace)
 			}
-			if got.EffectivePolicy.CPU.LimitReductionGuard == nil || !got.EffectivePolicy.CPU.LimitReductionGuard.RequireCompleteCoverage {
-				t.Fatal("missing enforced guard")
+			if !got.EffectivePolicy.CPU.ExistingLimitsOnly || got.EffectivePolicy.CPU.LimitReductionGuard == nil {
+				t.Fatal("existing-only cap guard missing from replay policy")
 			}
 			if replay := run(t, in, got.EffectivePolicy); !reflect.DeepEqual(replay, got) {
 				t.Fatal("recorded policy does not reproduce the result")
 			}
 		})
+	}
+}
+
+func TestExistingLimitGuardsPreservePrimaryReleaseSelection(t *testing.T) {
+	in, p := existingLimitFixture(false)
+	c := &in.Containers[0]
+	p.Memory.SafetyGuards = false
+	c.CPU.CurrentLimit.Value = 1000
+	// Primary usage detects an earlier transition; the cap proof must still
+	// see the more recent transition that appears only in CFS.
+	c.Memory.Series = append(c.Memory.Series, guardCounter("early-rollout", "C", epoch+10*60000, []float64{1}))
+	// This runtime began after an intervening rollout visible only in CFS.
+	c.Inventory.CurrentPods["pod-1"] = in.EvaluationTime - 4*60000
+	throttling := &c.Classification.Throttling
+	throttling.Periods = append(throttling.Periods, guardCounter("intervening", "B", in.EvaluationTime-5*60000, []float64{1}))
+	for _, strictPrimary := range []bool{false, true} {
+		p.CPU.LimitReductionGuard = &CPULimitReductionGuardPolicy{RequireCompleteCoverage: strictPrimary}
+		base := p
+		base.CPU.ExistingLimitsOnly = false
+		primary := run(t, in, base)
+		out := run(t, in, p)
+		if !reflect.DeepEqual(primary.Results[0], out.Results[0]) || !reflect.DeepEqual(guardSettingTrace(primary.Results[1], SettingRequests), guardSettingTrace(out.Results[1], SettingRequests)) {
+			t.Fatalf("secondary guard changed primary sizing (strict primary=%t)", strictPrimary)
+		}
+		if _, ok := guardRecommendation(out.Results[1], SettingLimits); ok {
+			t.Fatal("a candidate based on demand from before the rollback produced a cap proposal")
+		}
+		if replay := run(t, in, out.EffectivePolicy); !reflect.DeepEqual(out, replay) {
+			t.Fatal("effective policy changed primary or cap release selection on replay")
+		}
 	}
 }
 

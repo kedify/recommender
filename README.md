@@ -127,6 +127,9 @@ A numeric raise requires repeated pressure in verified current intervals and
 recurring measured demand on a pressured Pod materially above its current cap.
 The request-ratio candidate must fall within the configured material-change band
 of that measured demand times headroom. Otherwise the trace explains the hold.
+For a Pod that stays at one restrictive quota, its measured consumption usually
+cannot establish the size of a raise. Earlier observations from the same runtime
+under a looser quota can provide that evidence.
 This mode emits `resource-analysis-output/v4`; legacy requests-only and full
 limit strategies continue to emit v3. Older policy readers execute requests-only
 sizing and older patch builders reject saved v4 analysis.
