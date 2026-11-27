@@ -217,7 +217,7 @@ func TestCPUThrottlingCoverageRequiresValidatedExpectedSet(t *testing.T) {
 			in := guardCoverageInput(make([]float64, 11))
 			test.mutate(&in)
 			c := in.Containers[0]
-			if got := cpuThrottlingCoverage(in, c, c.CPU, 120); got.proven != test.proven {
+			if got := cpuThrottlingCoverage(in, c, c.CPU, 120, false); got.proven != test.proven {
 				t.Fatalf("coverage proof %v, want %v: %+v", got.proven, test.proven, got)
 			}
 		})

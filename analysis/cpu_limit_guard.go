@@ -21,8 +21,10 @@ const (
 	ReasonCPULimitBelowDemand Reason = "cpu-limit-below-recurring-demand"
 	// ReasonCPULimitEvidenceIncomplete: strict coverage was requested but
 	// recurring demand or CFS coverage of every current eligible Pod could not
-	// be proven, so the reduction is held as unknown, never treated as zero.
+	// be proven, so the cap change is held.
 	ReasonCPULimitEvidenceIncomplete Reason = "cpu-limit-evidence-incomplete"
+	ReasonCPUIncreaseNoPressure      Reason = "cpu-limit-increase-without-repeated-pressure"
+	ReasonCPUIncreaseDemandUnknown   Reason = "cpu-limit-increase-amount-unproven"
 )
 
 const (
@@ -50,8 +52,8 @@ type CPULimitReductionGuardPolicy struct {
 	RecurringSamples int `json:"recurringSamples"`
 	// RequireCompleteCoverage makes the guard strict: a reduction proceeds only
 	// with credible recurring demand and fresh, aligned same-release CFS proof
-	// for every current eligible Pod; anything missing holds it. False keeps the
-	// legacy behavior exactly.
+	// for every current eligible Pod; anything missing holds it. Existing-only
+	// cap advice always requires this proof, independently of the primary policy.
 	RequireCompleteCoverage bool `json:"requireCompleteCoverage,omitempty"`
 }
 
@@ -65,15 +67,34 @@ func normalizeCPULimitReductionGuard(g CPULimitReductionGuardPolicy) (CPULimitRe
 	return g, nil
 }
 
-// cpuLimitReductionHold runs the two independent checks and returns the reasons
+// cpuLimitChangeHold runs the two independent checks and returns the reasons
 // that hold the candidate. Demand cannot see quota-suppressed demand, and
 // throttling cannot see uncapped demand, so neither substitutes for the other.
-func cpuLimitReductionHold(in Input, c ContainerObservation, obs ResourceObservation, headroom float64, g CPULimitReductionGuardPolicy, freshnessSeconds float64, candidate float64, trace *SettingTrace) []Reason {
+func cpuLimitChangeHold(in Input, c ContainerObservation, capReleaseStart int64, policy CPUPolicy, freshnessSeconds float64, candidate float64, trace *SettingTrace) []Reason {
+	g := *policy.LimitReductionGuard
+	if policy.ExistingLimitsOnly {
+		if capReleaseStart > c.Identity.ReleaseStartedAt {
+			trace.guard("sized request belongs to the verified CPU quota release", false, map[string]float64{
+				"sizingReleaseStart": float64(c.Identity.ReleaseStartedAt), "verifiedReleaseStart": float64(capReleaseStart),
+			})
+			return []Reason{ReasonCPULimitEvidenceIncomplete}
+		}
+		g.RequireCompleteCoverage = true
+	}
+	obs := c.CPU
+	headroom := policy.HeadroomCoefficient
+	var cov cpuThrottlingCoverageEvidence
+	if g.RequireCompleteCoverage && obs.CurrentLimit.Value > 0 {
+		cov = cpuThrottlingCoverage(in, c, obs, freshnessSeconds, policy.ExistingLimitsOnly)
+	}
+	if policy.ExistingLimitsOnly && candidate > obs.CurrentLimit.Value {
+		return cpuLimitIncreaseHold(in, c, obs, policy, cov, freshnessSeconds, candidate, trace)
+	}
 	var held []Reason
 	var demand float64
 	var complete bool
 	if g.RequireCompleteCoverage {
-		demand, complete = strictRecurringCPUDemand(in, c, obs, g.RecurringSamples, freshnessSeconds)
+		demand, complete = strictRecurringCPUDemand(in, c, obs, g.RecurringSamples, freshnessSeconds, nil)
 	} else {
 		demand, complete = recurringCPUDemand(in, c, obs, g.RecurringSamples)
 	}
@@ -99,10 +120,6 @@ func cpuLimitReductionHold(in Input, c ContainerObservation, obs ResourceObserva
 		// must still fit the first proposed limit.
 		return held
 	}
-	var cov cpuThrottlingCoverageEvidence
-	if g.RequireCompleteCoverage {
-		cov = cpuThrottlingCoverage(in, c, obs, freshnessSeconds)
-	}
 	pressure := cpuQuotaPressure(in, c, freshnessSeconds, cov.proven)
 	values := map[string]float64{"freshLifetimes": float64(pressure.freshLifetimes), "staleLifetimes": float64(pressure.staleLifetimes), "pressuredLifetimes": float64(pressure.pressuredLifetimes), "isolatedLifetimes": float64(pressure.isolatedLifetimes), "positiveIntervals": float64(pressure.positiveIntervals), "minimumPositiveIntervals": cpuQuotaPressureMinIntervals, "freshnessSeconds": freshnessSeconds, "throttledPeriods": pressure.throttledPeriods, "throttledSeconds": pressure.throttledSeconds}
 	switch {
@@ -110,7 +127,7 @@ func cpuLimitReductionHold(in Input, c ContainerObservation, obs ResourceObserva
 		// Repeated positive intervals in one fresh lifetime: actual evidence.
 		trace.guard(ruleCPUQuotaPressure, false, values)
 		held = append(held, ReasonCPUThrottlingPressure)
-	case cov.proven && cov.repeatedPods > 0:
+	case cov.proven && len(cov.repeatedPods) > 0:
 		// Verified spans repeat throttling the lifetime scan did not count: still
 		// pressure, never reported as measured zero or isolated.
 		trace.guard(ruleCPUQuotaPressure, false, cpuCoverageSpanValues(values, cov))
@@ -133,12 +150,47 @@ func cpuLimitReductionHold(in Input, c ContainerObservation, obs ResourceObserva
 	if g.RequireCompleteCoverage {
 		// Coverage is a precondition, not a safety verdict: zero throttling under
 		// the current, higher cap says nothing about demand under a lower one.
-		trace.guard(ruleCPUThrottlingCoverage, cov.proven, map[string]float64{"sourceComplete": cpuGuardFlag(cov.sourceComplete), "inventoryValid": cpuGuardFlag(cov.inventoryValid), "eligiblePods": float64(cov.eligiblePods), "expectedPods": float64(cov.expectedPods), "provenPods": float64(cov.provenPods), "minimumAlignedIntervals": cpuCoverageMinIntervals, "freshnessSeconds": freshnessSeconds})
+		trace.guard(ruleCPUThrottlingCoverage, cov.proven, cov.coverageValues(freshnessSeconds))
 		if !cov.proven {
 			held = appendNotice(held, ReasonCPULimitEvidenceIncomplete)
 		}
 	}
 	return held
+}
+
+// Throttling measures time or periods denied, not how many more cores are
+// needed. A numeric raise needs both current repeated quota pressure and
+// independently observed recurring demand on a pressured Pod. This can include
+// measurements earlier in the same runtime while the quota was less restrictive.
+func cpuLimitIncreaseHold(in Input, c ContainerObservation, obs ResourceObservation, p CPUPolicy, cov cpuThrottlingCoverageEvidence, freshness, candidate float64, trace *SettingTrace) []Reason {
+	trace.guard(ruleCPUThrottlingCoverage, cov.proven, cov.coverageValues(freshness))
+	if !cov.proven {
+		return []Reason{ReasonCPULimitEvidenceIncomplete}
+	}
+	pressured := len(cov.repeatedPods) > 0
+	trace.guard("repeated throttling at the current applied quota", pressured, cpuCoverageSpanValues(nil, cov))
+	if !pressured {
+		return []Reason{ReasonCPUIncreaseNoPressure}
+	}
+	demand, complete := strictRecurringCPUDemand(in, c, obs, p.LimitReductionGuard.RecurringSamples, freshness, cov.repeatedPods)
+	if !complete {
+		trace.guard(ruleCPURecurringDemandUnknown, false, nil)
+		return []Reason{ReasonCPUIncreaseDemandUnknown, ReasonCPULimitEvidenceIncomplete}
+	}
+	supported := demand * p.HeadroomCoefficient
+	// Demand at the current cap cannot quantify a raise. The policy estimate
+	// may provide partial relief when measured demand exceeds it, but may not
+	// materially exceed the independently measured headroom.
+	passed := finite(supported) && demand > obs.CurrentLimit.Value && isMaterial(obs.CurrentLimit, demand, p.Bounds) &&
+		(candidate <= supported || !isMaterial(Signal{Value: supported}, candidate, p.Bounds))
+	trace.guard("recurring demand supports the proposed CPU limit increase", passed, map[string]float64{
+		"currentLimit": obs.CurrentLimit.Value, "recurringDemand": demand, "coefficient": p.HeadroomCoefficient,
+		"candidate": candidate, "minimumAbsoluteChange": p.Bounds.MinimumAbsoluteChange, "minimumRelativeChange": p.Bounds.MinimumRelativeChange,
+	})
+	if !passed {
+		return []Reason{ReasonCPUIncreaseDemandUnknown}
+	}
+	return nil
 }
 
 // recurringCPUDemand uses the sizing conversion and current-release window of
@@ -169,7 +221,7 @@ func recurringCPUDemand(in Input, c ContainerObservation, obs ResourceObservatio
 
 // Strict demand needs recurring observations for every eligible Pod. A
 // recent sample can establish that a Pod is present without proving its demand.
-func strictRecurringCPUDemand(in Input, c ContainerObservation, obs ResourceObservation, count int, freshnessSeconds float64) (float64, bool) {
+func strictRecurringCPUDemand(in Input, c ContainerObservation, obs ResourceObservation, count int, freshnessSeconds float64, selectedPods map[string]bool) (float64, bool) {
 	start := max(in.WindowStart, c.Identity.ReleaseStartedAt)
 	// Do not count observations from before the counter source proved that
 	// this container lifetime was running. In particular, old usage must not
@@ -225,6 +277,9 @@ func strictRecurringCPUDemand(in Input, c ContainerObservation, obs ResourceObse
 			}
 		}
 		seen[series.PodUID] = true
+		if selectedPods != nil && !selectedPods[series.PodUID] {
+			continue
+		}
 		slices.SortFunc(values, func(a, b Sample) int {
 			return cmp.Compare(a.Value, b.Value)
 		})
@@ -334,9 +389,9 @@ type cpuThrottlingCoverageEvidence struct {
 	expectedPods         int
 	provenPods           int
 	proven               bool
-	throttledPods        int     // proven Pods with any throttling in their span
-	repeatedPods         int     // proven Pods throttled in every span interval
-	spanPeriods          float64 // summed period deltas (denominator) of the verified spans
+	throttledPods        int             // proven Pods with any throttling in their span
+	repeatedPods         map[string]bool // proven Pods throttled in every span interval
+	spanPeriods          float64         // summed period deltas (denominator) of the verified spans
 	spanThrottledPeriods float64
 	spanThrottledSeconds float64
 }
@@ -348,9 +403,12 @@ func cpuGuardFlag(b bool) float64 {
 	return 0
 }
 
-// cpuCoverageSpanValues adds the verified-span totals to a copy of the trace
-// values; the lifetime-scan totals, which only sum repeated-positive series,
-// are left untouched.
+func (cov cpuThrottlingCoverageEvidence) coverageValues(freshnessSeconds float64) map[string]float64 {
+	return map[string]float64{"sourceComplete": cpuGuardFlag(cov.sourceComplete), "inventoryValid": cpuGuardFlag(cov.inventoryValid), "eligiblePods": float64(cov.eligiblePods), "expectedPods": float64(cov.expectedPods), "provenPods": float64(cov.provenPods), "minimumAlignedIntervals": cpuCoverageMinIntervals, "freshnessSeconds": freshnessSeconds}
+}
+
+// cpuCoverageSpanValues adds aligned-span totals alongside the lifetime-scan
+// totals, which only sum series with repeated pressure.
 func cpuCoverageSpanValues(values map[string]float64, cov cpuThrottlingCoverageEvidence) map[string]float64 {
 	out := make(map[string]float64, len(values)+6)
 	for k, v := range values {
@@ -358,7 +416,7 @@ func cpuCoverageSpanValues(values map[string]float64, cov cpuThrottlingCoverageE
 	}
 	out["provenPods"] = float64(cov.provenPods)
 	out["throttledPods"] = float64(cov.throttledPods)
-	out["repeatedPods"] = float64(cov.repeatedPods)
+	out["repeatedPods"] = float64(len(cov.repeatedPods))
 	out["spanPeriods"] = cov.spanPeriods
 	out["spanThrottledPeriods"] = cov.spanThrottledPeriods
 	out["spanThrottledSeconds"] = cov.spanThrottledSeconds
@@ -393,19 +451,19 @@ func cpuCounterSeriesCurrent(series Series, start int64, in Input, freshnessSeco
 // expected Pod needs exactly one runtime lifetime per CFS family, all sharing
 // one series ID, with a fresh aligned adjacent span (cpuCoverageSpan). All
 // joins are map lookups; nothing is compared pairwise.
-func cpuThrottlingCoverage(in Input, c ContainerObservation, obs ResourceObservation, freshnessSeconds float64) cpuThrottlingCoverageEvidence {
+func cpuThrottlingCoverage(in Input, c ContainerObservation, obs ResourceObservation, freshnessSeconds float64, requireAppliedQuota bool) cpuThrottlingCoverageEvidence {
 	inv := c.Inventory
 	start := max(in.WindowStart, c.Identity.ReleaseStartedAt)
-	e := cpuThrottlingCoverageEvidence{eligiblePods: inv.Eligible}
+	e := cpuThrottlingCoverageEvidence{eligiblePods: inv.Eligible, repeatedPods: make(map[string]bool)}
 	if c.Classification == nil || !c.Classification.Throttling.SourceComplete {
 		return e
 	}
 	e.sourceComplete = true
-	if c.Target.WorkloadUID == "" || c.Target.Release == "" || !inv.Available || inv.Eligible <= 0 || inv.Observed != inv.Eligible || inv.Excluded != 0 || inv.Timestamp < start || !cpuGuardFresh(inv.Timestamp, in, freshnessSeconds) {
+	if c.Target.WorkloadUID == "" || c.Target.Release == "" || !inv.Available || inv.Eligible <= 0 || inv.Observed != inv.Eligible || inv.Excluded != 0 || inv.CurrentPods != nil && len(inv.CurrentPods) != inv.Eligible || inv.Timestamp < start || !cpuGuardFresh(inv.Timestamp, in, freshnessSeconds) {
 		return e
 	}
 	e.inventoryValid = true
-	expected := map[string]bool{}
+	expected := map[string]Series{}
 	for _, s := range obs.Series {
 		if s.CPUGuardAdvisoryOnly || s.WorkloadUID != c.Target.WorkloadUID || s.Release != c.Target.Release {
 			continue
@@ -414,21 +472,19 @@ func cpuThrottlingCoverage(in Input, c ContainerObservation, obs ResourceObserva
 		if err != nil || len(values) == 0 {
 			continue
 		}
-		latest := values[0].Timestamp
-		for _, v := range values {
-			latest = max(latest, v.Timestamp)
-		}
+		// NormalizeSamples orders observations by source time.
+		latest := values[len(values)-1].Timestamp
 		if !cpuGuardFresh(latest, in, freshnessSeconds) {
 			continue
 		}
 		if _, current := inv.CurrentPods[s.PodUID]; inv.CurrentPods != nil && !current {
 			continue
 		}
-		if s.PodUID == "" || expected[s.PodUID] {
+		if _, duplicate := expected[s.PodUID]; s.PodUID == "" || duplicate {
 			// An unattributable or repeated Pod makes the expected set unreliable.
 			return e
 		}
-		expected[s.PodUID] = true
+		expected[s.PodUID] = s
 	}
 	e.expectedPods = len(expected)
 	if e.expectedPods != inv.Eligible {
@@ -472,9 +528,12 @@ func cpuThrottlingCoverage(in Input, c ContainerObservation, obs ResourceObserva
 		if !okP || !okT || !okS || p.ID != th.ID || p.ID != sec.ID || inv.CurrentPods != nil && runtimeStart <= 0 {
 			continue
 		}
+		if requireAppliedQuota && (runtimeStart <= 0 || min(p.CPUGuardStart, th.CPUGuardStart, sec.CPUGuardStart) <= 0) {
+			continue
+		}
 		quotaStart := max(start, runtimeStart, p.CPUGuardStart, th.CPUGuardStart, sec.CPUGuardStart)
 		span, ok := cpuCoverageSpan(p, th, sec, quotaStart, in, freshnessSeconds, throttling.CoverageAt)
-		if !ok {
+		if !ok || requireAppliedQuota && !usageInCFSSpan(expected[pod], quotaStart, span) {
 			continue
 		}
 		e.provenPods++
@@ -485,13 +544,29 @@ func cpuThrottlingCoverage(in Input, c ContainerObservation, obs ResourceObserva
 			e.throttledPods++
 		}
 		if span.throttledRises >= cpuQuotaPressureMinIntervals || span.secondsRises >= cpuQuotaPressureMinIntervals {
-			e.repeatedPods++
+			e.repeatedPods[pod] = true
 		}
 	}
 	// The span totals are the denominator behind a measured-zero or isolated
 	// verdict: a zero, NaN or overflowed denominator is never proof.
 	e.proven = e.provenPods == e.expectedPods && e.spanPeriods > 0 && finite(e.spanPeriods) && finite(e.spanThrottledPeriods) && finite(e.spanThrottledSeconds)
 	return e
+}
+
+// The series has already been validated. Find usage observed during the actual
+// CFS proof, allowing independent collection timestamps. A counter-derived
+// rate needs two distinct readings under the current quota.
+func usageInCFSSpan(series Series, quotaStart int64, span cpuCoverageSpanTotals) bool {
+	if series.Kind == SampleGauge {
+		return slices.ContainsFunc(series.Samples, func(sample Sample) bool {
+			return sample.Timestamp >= span.start && sample.Timestamp <= span.end
+		})
+	}
+	// Work from raw CPU seconds. CounterIntervals drops resets and cadence
+	// gaps. A rate ending exactly at the start covers only the prior span.
+	series.Kind = SampleGauge
+	intervals, err := CounterIntervals(series, quotaStart, span.end)
+	return err == nil && len(intervals) != 0 && intervals[len(intervals)-1].End > span.start
 }
 
 // cpuCoverageSpan requires the latest periods interval to be fresh and the
@@ -557,11 +632,13 @@ func cpuCoverageSpan(periods, throttled, seconds Series, start int64, in Input, 
 		}
 		next = v.Start
 	}
+	t.start, t.end = next, latest.End
 	return t, true
 }
 
 // cpuCoverageSpanTotals are the paired CFS deltas of one Pod's verified span.
 type cpuCoverageSpanTotals struct {
+	start, end       int64
 	periods          float64
 	throttledPeriods float64
 	throttledSeconds float64

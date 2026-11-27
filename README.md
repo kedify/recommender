@@ -118,6 +118,25 @@ reasons; an empty recommendation list always includes a no-action reason. Detect
 and normalized-policy identities are independent from schema versions. Consumers
 should pin a released module version and invalidate/recompute old findings.
 
+A requests-only CPU strategy can enable `cpu.existingLimitsOnly` to evaluate
+verified finite caps alongside the same primary requests. An observed absent or
+zero allocation stays uncapped. All material cap changes require fresh usage,
+identified current runtimes, applied-quota boundaries and aligned CFS coverage
+for every eligible Pod. Each Pod needs a usage observation within the verified
+CFS intervals at its current quota. A counter-derived rate needs both readings at that
+quota. Cuts retain the recurring-demand and throttling vetoes.
+A numeric raise requires repeated pressure in verified current intervals and
+recurring measured demand on a pressured Pod materially above its current cap.
+The request-ratio candidate must not materially exceed that measured demand
+times headroom. When measured demand exceeds the proposed cap, the estimate
+offers partial relief. The trace records the candidate and measured demand.
+For a Pod that stays at one restrictive quota, its measured consumption usually
+cannot establish the size of a raise. Earlier observations from the same runtime
+under a looser quota can provide that evidence.
+This mode emits `resource-analysis-output/v4`; legacy requests-only and full
+limit strategies continue to emit v3. Older policy readers execute requests-only
+sizing and older patch builders reject saved v4 analysis.
+
 When an adapter supplies `inventory.currentPods`, the keys identify current Pods
 and the values give the running container start time in Unix milliseconds. A zero
 start preserves Pod identity while leaving the runtime unknown. Historical usage

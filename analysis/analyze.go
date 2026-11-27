@@ -102,8 +102,15 @@ func NormalizePolicy(p Policy) (Policy, error) {
 	if e.MinimumHistorySeconds < 1 || e.MinimumSamples < 2 || !positive(e.MinimumCoverage) || e.MinimumCoverage > 1 || e.FreshnessSeconds < 1 {
 		return Policy{}, fmt.Errorf("invalid evidence policy")
 	}
-	if p.CPU.LimitReductionGuard != nil {
-		guard, err := normalizeCPULimitReductionGuard(*p.CPU.LimitReductionGuard)
+	if p.CPU.ExistingLimitsOnly && !p.CPU.RequestsOnly {
+		return Policy{}, fmt.Errorf("cpu.existingLimitsOnly requires a requests-only primary strategy")
+	}
+	if p.CPU.ExistingLimitsOnly || p.CPU.LimitReductionGuard != nil {
+		var configured CPULimitReductionGuardPolicy
+		if p.CPU.LimitReductionGuard != nil {
+			configured = *p.CPU.LimitReductionGuard
+		}
+		guard, err := normalizeCPULimitReductionGuard(configured)
 		if err != nil {
 			return Policy{}, err
 		}
@@ -145,6 +152,11 @@ func Analyze(in Input, p Policy) (Output, error) {
 		return Output{}, err
 	}
 	out := Output{SchemaVersion: OutputSchemaVersion, DetectorVersion: ResourceRightSizeDetectorVersion, PolicyVersion: normalizedPolicyVersion(p), EffectivePolicy: p, Results: make([]ResourceAnalysis, 0, len(in.Containers)*2)}
+	if p.CPU.ExistingLimitsOnly {
+		// A reader that predates existing-only policy must not export a saved
+		// limit proposal as if it came from the legacy full-limit strategy.
+		out.SchemaVersion = ExistingCPULimitsOutputSchemaVersion
+	}
 	containers := append([]ContainerObservation(nil), in.Containers...)
 	for i, c := range containers {
 		if c.Target.Namespace == "" || c.Target.Kind == "" || c.Target.Name == "" || c.Target.Container == "" {
@@ -168,14 +180,22 @@ func Analyze(in Input, p Policy) (Output, error) {
 			// use the same event. Event selection reconciles repeated snapshots.
 			c.OOMKills = slices.Concat(c.OOMKills, c.Classification.OOMKills)
 		}
-		c, err = selectEvidence(in, c, p.Memory.SafetyGuards || p.CPU.LimitReductionGuard != nil && p.CPU.LimitReductionGuard.RequireCompleteCoverage)
+		primaryUsesCFS := p.Memory.SafetyGuards || p.CPU.LimitReductionGuard != nil && p.CPU.LimitReductionGuard.RequireCompleteCoverage
+		c, err = selectEvidence(in, c, primaryUsesCFS)
 		if err != nil {
 			return Output{}, fmt.Errorf("%s OOM evidence: %w", original.Target.Name, err)
 		}
 		usageIn := in
 		usageIn.WindowStart = max(in.WindowStart, c.Identity.UsageStart)
+		capReleaseStart := c.Identity.ReleaseStartedAt
+		if p.CPU.ExistingLimitsOnly && !primaryUsesCFS {
+			// A CFS-only rollout fences secondary cap evidence without changing
+			// the existing primary request or memory sizing window.
+			verified, _ := selectReleaseSegment(in, original, true)
+			capReleaseStart = verified.Identity.ReleaseStartedAt
+		}
 		for _, r := range []Resource{ResourceMemory, ResourceCPU} {
-			result, err := analyzeResource(usageIn, c, r, p)
+			result, err := analyzeResource(usageIn, c, r, p, capReleaseStart)
 			if err != nil {
 				return Output{}, fmt.Errorf("%s %s: %w", c.Target.Name, r, err)
 			}
@@ -225,7 +245,7 @@ func addReason(q *DataQuality, r Reason) {
 	q.Reasons = append(q.Reasons, r)
 }
 
-func analyzeResource(in Input, c ContainerObservation, r Resource, p Policy) (ResourceAnalysis, error) {
+func analyzeResource(in Input, c ContainerObservation, r Resource, p Policy, capReleaseStart int64) (ResourceAnalysis, error) {
 	obs := c.Memory
 	headroom, ratio, bounds, requestsOnly := p.Memory.HeadroomCoefficient, p.Memory.LimitsToRequestsRatio, p.Memory.Bounds, p.Memory.RequestsOnly
 	if r == ResourceCPU {
@@ -423,7 +443,10 @@ func analyzeResource(in Input, c ContainerObservation, r Resource, p Policy) (Re
 		addReason(q, ReasonBounds)
 	}
 	var suggestedLimit float64
-	if !requestsOnly {
+	// Missing or stale signals retain the shared unavailable disposition. Only a
+	// known uncapped setting is disabled under existing-limit management.
+	limitsEnabled := !requestsOnly || r == ResourceCPU && p.CPU.ExistingLimitsOnly && !(limitOK && obs.CurrentLimit.Value == 0)
+	if limitsEnabled {
 		rawSuggestedLimit := suggestedRequest * ratio
 		if !finite(rawSuggestedLimit) {
 			return ResourceAnalysis{}, fmt.Errorf("suggested value overflow")
@@ -452,14 +475,14 @@ func analyzeResource(in Input, c ContainerObservation, r Resource, p Policy) (Re
 		missing, old Reason
 	}{
 		{SettingRequests, obs.CurrentRequest, suggestedRequest, requestOK, ReasonMissingRequest, ReasonStaleRequest},
-		{SettingLimits, obs.CurrentLimit, suggestedLimit, limitOK && !requestsOnly, ReasonMissingLimit, ReasonStaleLimit},
+		{SettingLimits, obs.CurrentLimit, suggestedLimit, limitOK && limitsEnabled, ReasonMissingLimit, ReasonStaleLimit},
 	} {
 		settingTrace := requestTrace
 		if s.setting == SettingLimits {
 			settingTrace = limitTrace
 		}
 		if !s.ok {
-			if requestsOnly && s.setting == SettingLimits {
+			if !limitsEnabled && s.setting == SettingLimits {
 				settingTrace.stop("disabled", ReasonLimitDisabled)
 			} else {
 				settingTrace.stop("unavailable", s.missing)
@@ -501,15 +524,15 @@ func analyzeResource(in Input, c ContainerObservation, r Resource, p Policy) (Re
 			downsizeSuppressed = downsizeSuppressed || isMaterial(s.current, s.suggested, bounds)
 			continue
 		}
-		// The strict policy also checks demand before introducing a CPU limit.
-		// An uncapped container does not need to establish CFS coverage.
-		// A held reduction keeps the current limit, which is above the suggested
-		// limit and therefore above any request recommended by this pass.
-		if r == ResourceCPU && s.setting == SettingLimits && p.CPU.LimitReductionGuard != nil && (s.suggested < s.current.Value || p.CPU.LimitReductionGuard.RequireCompleteCoverage && s.current.Value == 0) && isMaterial(s.current, s.suggested, bounds) {
-			if held := cpuLimitReductionHold(in, c, obs, headroom, *p.CPU.LimitReductionGuard, float64(p.Evidence.FreshnessSeconds), s.suggested, settingTrace); len(held) > 0 {
+		// Existing-cap review checks both directions. The legacy strict strategy
+		// also checks recurring demand before a first cap, which has no quota yet.
+		if r == ResourceCPU && s.setting == SettingLimits && p.CPU.LimitReductionGuard != nil && (p.CPU.ExistingLimitsOnly || s.suggested < s.current.Value || p.CPU.LimitReductionGuard.RequireCompleteCoverage && s.current.Value == 0) && isMaterial(s.current, s.suggested, bounds) {
+			if held := cpuLimitChangeHold(in, c, capReleaseStart, p.CPU, float64(p.Evidence.FreshnessSeconds), s.suggested, settingTrace); len(held) > 0 {
 				settingTrace.stop("retained", held...)
 				for _, reason := range held {
-					result.Notices = appendNotice(result.Notices, reason)
+					if reason != ReasonCPUIncreaseNoPressure {
+						result.Notices = appendNotice(result.Notices, reason)
+					}
 				}
 				if limitHoldReason == "" {
 					limitHoldReason = held[0]
@@ -577,7 +600,7 @@ func analyzeResource(in Input, c ContainerObservation, r Resource, p Policy) (Re
 			settingTrace.stop("retained", ReasonNoMaterialChange)
 		}
 	}
-	if requestsOnly {
+	if !limitsEnabled {
 		addReason(q, ReasonLimitDisabled)
 	}
 	if len(q.Reasons) > 0 {
