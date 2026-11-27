@@ -463,7 +463,8 @@ func cpuThrottlingCoverage(in Input, c ContainerObservation, obs ResourceObserva
 		return e
 	}
 	e.inventoryValid = true
-	expected := map[string]bool{}
+	type usageSpan struct{ start, end int64 }
+	expected := map[string]usageSpan{}
 	for _, s := range obs.Series {
 		if s.CPUGuardAdvisoryOnly || s.WorkloadUID != c.Target.WorkloadUID || s.Release != c.Target.Release {
 			continue
@@ -472,21 +473,29 @@ func cpuThrottlingCoverage(in Input, c ContainerObservation, obs ResourceObserva
 		if err != nil || len(values) == 0 {
 			continue
 		}
-		latest := values[0].Timestamp
-		for _, v := range values {
-			latest = max(latest, v.Timestamp)
-		}
+		// NormalizeSamples orders observations by source time.
+		latest := values[len(values)-1].Timestamp
 		if !cpuGuardFresh(latest, in, freshnessSeconds) {
 			continue
 		}
 		if _, current := inv.CurrentPods[s.PodUID]; inv.CurrentPods != nil && !current {
 			continue
 		}
-		if s.PodUID == "" || expected[s.PodUID] {
+		if _, duplicate := expected[s.PodUID]; s.PodUID == "" || duplicate {
 			// An unattributable or repeated Pod makes the expected set unreliable.
 			return e
 		}
-		expected[s.PodUID] = true
+		usage := usageSpan{start: latest, end: latest}
+		if requireAppliedQuota && s.Kind == SampleCPUCounterSeconds {
+			// A rate also depends on the previous distinct raw reading.
+			usage.start = 0
+			for _, sample := range s.Samples {
+				if sample.Timestamp < latest {
+					usage.start = max(usage.start, sample.Timestamp)
+				}
+			}
+		}
+		expected[s.PodUID] = usage
 	}
 	e.expectedPods = len(expected)
 	if e.expectedPods != inv.Eligible {
@@ -535,7 +544,8 @@ func cpuThrottlingCoverage(in Input, c ContainerObservation, obs ResourceObserva
 		}
 		quotaStart := max(start, runtimeStart, p.CPUGuardStart, th.CPUGuardStart, sec.CPUGuardStart)
 		span, ok := cpuCoverageSpan(p, th, sec, quotaStart, in, freshnessSeconds, throttling.CoverageAt)
-		if !ok {
+		usage := expected[pod]
+		if !ok || requireAppliedQuota && (usage.start < quotaStart || usage.end < span.start) {
 			continue
 		}
 		e.provenPods++
@@ -618,11 +628,13 @@ func cpuCoverageSpan(periods, throttled, seconds Series, start int64, in Input, 
 		}
 		next = v.Start
 	}
+	t.start = next
 	return t, true
 }
 
 // cpuCoverageSpanTotals are the paired CFS deltas of one Pod's verified span.
 type cpuCoverageSpanTotals struct {
+	start            int64
 	periods          float64
 	throttledPeriods float64
 	throttledSeconds float64

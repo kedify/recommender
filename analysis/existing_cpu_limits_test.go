@@ -207,6 +207,50 @@ func TestRaiseCannotCombinePressureAndDemandFromDifferentReplicas(t *testing.T) 
 	}
 }
 
+func TestExistingCPULimitRequiresUsageAtTheProvenQuota(t *testing.T) {
+	for _, tc := range []struct {
+		name                            string
+		increase, counter               bool
+		lastMinutesAgo, quotaMinutesAgo int
+		currentCounterInterval, want    bool
+	}{
+		{name: "cut with usage before resized quota", lastMinutesAgo: 4, quotaMinutesAgo: 2},
+		{name: "raise with usage before resized quota", increase: true, lastMinutesAgo: 4, quotaMinutesAgo: 2},
+		{name: "usage before both proven CFS intervals", lastMinutesAgo: 4, quotaMinutesAgo: 10},
+		{name: "independent gauge during CFS proof", lastMinutesAgo: 1, quotaMinutesAgo: 2, want: true},
+		{name: "counter rate crossing quota change", counter: true, lastMinutesAgo: 1, quotaMinutesAgo: 2},
+		{name: "entire counter rate at current quota", counter: true, lastMinutesAgo: 1, quotaMinutesAgo: 2, currentCounterInterval: true, want: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			in, p := existingLimitFixture(tc.increase)
+			c := &in.Containers[0]
+			if !tc.increase {
+				c.CPU.CurrentLimit.Value = 1000
+			}
+			throttling := c.Classification.Throttling
+			for _, rows := range [][]Series{throttling.Periods, throttling.ThrottledPeriods, throttling.Seconds} {
+				rows[0].CPUGuardStart = in.EvaluationTime - int64(tc.quotaMinutesAgo)*60000
+			}
+			usage := &c.CPU.Series[0]
+			usage.Samples = usage.Samples[:len(usage.Samples)-tc.lastMinutesAgo]
+			if tc.counter {
+				usage.Kind = SampleCPUCounterSeconds
+				for i := range usage.Samples {
+					usage.Samples[i].Value = float64(i) * 6
+				}
+				if !tc.currentCounterInterval {
+					usage.Samples = slices.Delete(usage.Samples, len(usage.Samples)-2, len(usage.Samples)-1)
+				}
+			}
+			cpu := run(t, in, p).Results[1]
+			rec, issued := guardRecommendation(cpu, SettingLimits)
+			if issued != tc.want || !issued && !slices.Contains(guardSettingTrace(cpu, SettingLimits).Reasons, ReasonCPULimitEvidenceIncomplete) {
+				t.Fatalf("limit %+v, trace %+v", rec, guardSettingTrace(cpu, SettingLimits))
+			}
+		})
+	}
+}
+
 func TestExistingLimitsCannotEnableLegacyFullLimitSizing(t *testing.T) {
 	in, p := existingLimitFixture(true)
 	p.CPU.RequestsOnly = false
