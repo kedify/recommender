@@ -34,6 +34,8 @@ const (
 // ClassificationObservation contains optional, adapter-attributed evidence.
 // OOMKills here are classification-only and cannot affect sizing. Throttling
 // series hold raw cumulative counters with Kind=SampleGauge, never CPU usage.
+// Only an explicit Policy.CPU.LimitReductionGuard may use verified positive
+// same-release throttling to hold a CPU limit reduction; it never sizes values.
 type ClassificationObservation struct {
 	LeasesAvailable bool                     `json:"leasesAvailable,omitempty"`
 	Leases          []LeaseObservation       `json:"leases,omitempty"`
@@ -76,6 +78,15 @@ type CPUThrottlingObservation struct {
 	Seconds          []Series `json:"seconds,omitempty"`
 	ThrottledPeriods []Series `json:"throttledPeriods,omitempty"`
 	Periods          []Series `json:"periods,omitempty"`
+	// SourceComplete is set by the adapter only when it saw no failed or partial
+	// CFS collection and can identify raw CFS runtime lifetimes. It is a
+	// precondition for strict coverage, never proof of coverage or of zero
+	// throttling.
+	SourceComplete bool `json:"sourceComplete,omitempty"`
+	// CoverageAt, when set, is the complete source snapshot timestamp in
+	// Unix milliseconds. Historical counters can explain pressure without
+	// certifying membership in that snapshot.
+	CoverageAt int64 `json:"coverageAt,omitempty"`
 }
 type WorkloadClassification struct {
 	DetectorVersion string            `json:"detectorVersion"`
