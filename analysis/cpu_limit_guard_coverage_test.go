@@ -297,3 +297,39 @@ func TestStrictCPUCoverageRequiresLatestSnapshotForEveryFamily(t *testing.T) {
 		t.Fatalf("an earlier counter row certified current coverage: %+v", cpu)
 	}
 }
+
+func TestStrictCPUCoverageCannotUseAdvisoryRuntime(t *testing.T) {
+	for _, tc := range []struct {
+		name                        string
+		historicalOnly, currentOnly bool
+		want                        bool
+	}{
+		{name: "unmarked fresh history is ambiguous"},
+		{name: "advisory history cannot certify but valid current data can", historicalOnly: true, want: true},
+		{name: "advisory current runtime leaves proof incomplete", historicalOnly: true, currentOnly: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			in := guardCoverageInput(make([]float64, 11))
+			c := &in.Containers[0]
+			historicalUsage := c.CPU.Series[0]
+			historicalUsage.ID = "previous-usage"
+			historicalUsage.Samples = historicalUsage.Samples[:9]
+			historicalUsage.CPUGuardAdvisoryOnly = tc.historicalOnly
+			c.CPU.Series = append(c.CPU.Series, historicalUsage)
+			counter := guardCFS(&in)
+			for _, family := range []*[]Series{&counter.Periods, &counter.ThrottledPeriods, &counter.Seconds} {
+				historical := (*family)[0]
+				historical.ID = "previous-runtime"
+				historical.Samples = historical.Samples[:9]
+				historical.CPUGuardAdvisoryOnly = tc.historicalOnly
+				*family = append(*family, historical)
+			}
+			counter.Periods[0].CPUGuardAdvisoryOnly = tc.currentOnly
+			cpu := run(t, in, guardStrictPolicy()).Results[1]
+			_, proposed := guardRecommendation(cpu, SettingLimits)
+			if proposed != tc.want || !tc.want && !guardHasReason(cpu.Notices, ReasonCPULimitEvidenceIncomplete) {
+				t.Fatalf("finite reduction = %t, want %t: %+v", proposed, tc.want, cpu)
+			}
+		})
+	}
+}
