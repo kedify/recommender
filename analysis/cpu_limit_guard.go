@@ -463,8 +463,7 @@ func cpuThrottlingCoverage(in Input, c ContainerObservation, obs ResourceObserva
 		return e
 	}
 	e.inventoryValid = true
-	type usageSpan struct{ start, end int64 }
-	expected := map[string]usageSpan{}
+	expected := map[string]Series{}
 	for _, s := range obs.Series {
 		if s.CPUGuardAdvisoryOnly || s.WorkloadUID != c.Target.WorkloadUID || s.Release != c.Target.Release {
 			continue
@@ -485,17 +484,7 @@ func cpuThrottlingCoverage(in Input, c ContainerObservation, obs ResourceObserva
 			// An unattributable or repeated Pod makes the expected set unreliable.
 			return e
 		}
-		usage := usageSpan{start: latest, end: latest}
-		if requireAppliedQuota && s.Kind == SampleCPUCounterSeconds {
-			// A rate also depends on the previous distinct raw reading.
-			usage.start = 0
-			for _, sample := range s.Samples {
-				if sample.Timestamp < latest {
-					usage.start = max(usage.start, sample.Timestamp)
-				}
-			}
-		}
-		expected[s.PodUID] = usage
+		expected[s.PodUID] = s
 	}
 	e.expectedPods = len(expected)
 	if e.expectedPods != inv.Eligible {
@@ -544,8 +533,7 @@ func cpuThrottlingCoverage(in Input, c ContainerObservation, obs ResourceObserva
 		}
 		quotaStart := max(start, runtimeStart, p.CPUGuardStart, th.CPUGuardStart, sec.CPUGuardStart)
 		span, ok := cpuCoverageSpan(p, th, sec, quotaStart, in, freshnessSeconds, throttling.CoverageAt)
-		usage := expected[pod]
-		if !ok || requireAppliedQuota && (usage.start < quotaStart || usage.end < span.start) {
+		if !ok || requireAppliedQuota && !usageInCFSSpan(expected[pod], quotaStart, span) {
 			continue
 		}
 		e.provenPods++
@@ -563,6 +551,24 @@ func cpuThrottlingCoverage(in Input, c ContainerObservation, obs ResourceObserva
 	// verdict: a zero, NaN or overflowed denominator is never proof.
 	e.proven = e.provenPods == e.expectedPods && e.spanPeriods > 0 && finite(e.spanPeriods) && finite(e.spanThrottledPeriods) && finite(e.spanThrottledSeconds)
 	return e
+}
+
+// The series has already been validated. Find usage observed during the actual
+// CFS proof, allowing independent collection timestamps. A counter-derived
+// rate needs two distinct readings under the current quota.
+func usageInCFSSpan(series Series, quotaStart int64, span cpuCoverageSpanTotals) bool {
+	var first, last int64
+	for _, sample := range series.Samples {
+		ts := sample.Timestamp
+		if ts < quotaStart || ts > span.end {
+			continue
+		}
+		if first == 0 || ts < first {
+			first = ts
+		}
+		last = max(last, ts)
+	}
+	return last >= span.start && (series.Kind == SampleGauge || first < last)
 }
 
 // cpuCoverageSpan requires the latest periods interval to be fresh and the
@@ -628,13 +634,13 @@ func cpuCoverageSpan(periods, throttled, seconds Series, start int64, in Input, 
 		}
 		next = v.Start
 	}
-	t.start = next
+	t.start, t.end = next, latest.End
 	return t, true
 }
 
 // cpuCoverageSpanTotals are the paired CFS deltas of one Pod's verified span.
 type cpuCoverageSpanTotals struct {
-	start            int64
+	start, end       int64
 	periods          float64
 	throttledPeriods float64
 	throttledSeconds float64

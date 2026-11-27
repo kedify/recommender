@@ -251,6 +251,27 @@ func TestExistingCPULimitRequiresUsageAtTheProvenQuota(t *testing.T) {
 	}
 }
 
+func TestUsageAfterTheCertifiedCFSSnapshotCannotFillAGap(t *testing.T) {
+	in, p := existingLimitFixture(false)
+	c := &in.Containers[0]
+	c.CPU.CurrentLimit.Value = 1000
+	totals := &c.Classification.Throttling
+	totals.CoverageAt = in.EvaluationTime - 4*60000
+	for _, rows := range [][]Series{totals.Periods, totals.ThrottledPeriods, totals.Seconds} {
+		rows[0].Samples = rows[0].Samples[:97]
+	}
+	// The certified CFS span covers minutes 94 through 96. CPU usage arrived
+	// through minute 93 and resumed at 97, so both streams are fresh.
+	c.CPU.Series[0].Samples = slices.Delete(c.CPU.Series[0].Samples, 94, 97)
+	if _, issued := guardRecommendation(run(t, in, p).Results[1], SettingLimits); issued {
+		t.Fatal("issued a cut without a usage observation inside the verified CFS span")
+	}
+	c.CPU.Series[0].Samples = append(c.CPU.Series[0].Samples, Sample{Timestamp: totals.CoverageAt - 27000, Value: 100})
+	if rec, issued := guardRecommendation(run(t, in, p).Results[1], SettingLimits); !issued || rec.SuggestedValue != 500 {
+		t.Fatalf("an independently timed usage observation inside the CFS span did not qualify: %+v", rec)
+	}
+}
+
 func TestExistingLimitsCannotEnableLegacyFullLimitSizing(t *testing.T) {
 	in, p := existingLimitFixture(true)
 	p.CPU.RequestsOnly = false

@@ -122,8 +122,8 @@ A requests-only CPU strategy can enable `cpu.existingLimitsOnly` to evaluate
 verified finite caps alongside the same primary requests. An observed absent or
 zero allocation stays uncapped. All material cap changes require fresh usage,
 identified current runtimes, applied-quota boundaries and aligned CFS coverage
-for every eligible Pod. Each Pod's usage must reach the verified CFS intervals
-at its current quota. A counter-derived usage rate needs both readings at that
+for every eligible Pod. Each Pod needs a usage observation within the verified
+CFS intervals at its current quota. A counter-derived rate needs both readings at that
 quota. Cuts retain the recurring-demand and throttling vetoes.
 A numeric raise requires repeated pressure in verified current intervals and
 recurring measured demand on a pressured Pod materially above its current cap.
