@@ -83,6 +83,10 @@ type CPUThrottlingObservation struct {
 	// precondition for strict coverage, never proof of coverage or of zero
 	// throttling.
 	SourceComplete bool `json:"sourceComplete,omitempty"`
+	// CoverageAt, when set, is the complete source snapshot timestamp in
+	// Unix milliseconds. Historical counters can explain pressure without
+	// certifying membership in that snapshot.
+	CoverageAt int64 `json:"coverageAt,omitempty"`
 }
 type WorkloadClassification struct {
 	DetectorVersion string            `json:"detectorVersion"`

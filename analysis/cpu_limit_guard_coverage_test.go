@@ -220,3 +220,72 @@ func TestCPUThrottlingCoverageRequiresValidatedExpectedSet(t *testing.T) {
 		})
 	}
 }
+
+func TestStrictCPUDemandRequiresEveryPod(t *testing.T) {
+	in := guardCoverageInput(make([]float64, 11))
+	c := &in.Containers[0]
+	short := c.CPU.Series[0]
+	short.ID, short.PodUID = "short", "pod-short"
+	short.Samples = short.Samples[len(short.Samples)-2:]
+	c.CPU.Series = append(c.CPU.Series, short)
+	c.Inventory.Eligible, c.Inventory.Observed = 2, 2
+	counter := guardCFS(&in)
+	counter.Periods = append(counter.Periods, guardFamily("rt-short", short.PodUID, guardRamp(11, 100)))
+	counter.ThrottledPeriods = append(counter.ThrottledPeriods, guardFamily("rt-short", short.PodUID, make([]float64, 11)))
+	counter.Seconds = append(counter.Seconds, guardFamily("rt-short", short.PodUID, make([]float64, 11)))
+	cpu := run(t, in, guardStrictPolicy()).Results[1]
+	if _, ok := guardRecommendation(cpu, SettingLimits); ok || !guardHasReason(cpu.Notices, ReasonCPULimitEvidenceIncomplete) {
+		t.Fatalf("another Pod's samples must not supply recurring demand: %+v", cpu)
+	}
+}
+
+func TestStrictCPUCoverageIgnoresStaleRuntimeAndUsesSnapshot(t *testing.T) {
+	for _, withSnapshot := range []bool{false, true} {
+		in := guardCoverageInput(make([]float64, 11))
+		counter := guardCFS(&in)
+		old := guardFamily("previous-runtime", counter.Periods[0].PodUID, guardRamp(11, 100))
+		old.Samples = old.Samples[:4]
+		if withSnapshot {
+			counter.CoverageAt = in.EvaluationTime
+			old.Samples = guardFamily("previous-runtime", old.PodUID, guardRamp(11, 100)).Samples[:10]
+		}
+		counter.Periods = append(counter.Periods, old)
+		cpu := run(t, in, guardStrictPolicy()).Results[1]
+		if _, ok := guardRecommendation(cpu, SettingLimits); !ok {
+			t.Fatalf("withSnapshot=%t: historical counter held proven reduction: %+v", withSnapshot, cpu)
+		}
+	}
+}
+
+func TestStrictCPUCoverageUsesCurrentSegmentAfterRollback(t *testing.T) {
+	in := guardCoverageInput(make([]float64, 11))
+	counter := guardCFS(&in)
+	// Prior A pressure is still fresh, yet a B counter proves the latest A
+	// segment starts later. Current A has enough aligned intervals.
+	for i := range counter.ThrottledPeriods[0].Samples {
+		counter.ThrottledPeriods[0].Samples[i].Value = float64(min(i, 3)) * 10
+	}
+	other := guardFamily("intervening", "other-pod", guardRamp(11, 100))
+	other.Release = "B"
+	other.Samples = other.Samples[4:5]
+	counter.Periods = append(counter.Periods, other)
+	strict := run(t, in, guardStrictPolicy()).Results[1]
+	if _, ok := guardRecommendation(strict, SettingLimits); !ok {
+		t.Fatalf("old A pressure affected the new A segment: %+v", strict)
+	}
+	legacy := run(t, in, guardTestPolicy()).Results[1]
+	if !guardHasReason(legacy.Notices, ReasonCPUThrottlingPressure) {
+		t.Fatalf("legacy pressure evidence changed: %+v", legacy)
+	}
+}
+
+func TestStrictCPUCoverageRequiresLatestSnapshotForEveryFamily(t *testing.T) {
+	in := guardCoverageInput(make([]float64, 11))
+	counter := guardCFS(&in)
+	counter.CoverageAt = in.EvaluationTime
+	counter.Seconds[0].Samples = counter.Seconds[0].Samples[:10]
+	cpu := run(t, in, guardStrictPolicy()).Results[1]
+	if _, ok := guardRecommendation(cpu, SettingLimits); ok || !guardHasReason(cpu.Notices, ReasonCPULimitEvidenceIncomplete) {
+		t.Fatalf("an earlier counter row certified current coverage: %+v", cpu)
+	}
+}

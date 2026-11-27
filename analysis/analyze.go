@@ -473,7 +473,7 @@ func analyzeResource(in Input, c ContainerObservation, r Resource, p Policy) (Re
 					result.MemoryLeak = leak
 				}
 			}
-			// Only a hold is traced. Unavailable, immature, stale, inferred, or
+			// Only a hold is traced. Unavailable, immature, stale, unverified, or
 			// fallback evidence does not prove that growth is absent, so no passing
 			// guard is recorded for it.
 			if memoryGrowthHeld {

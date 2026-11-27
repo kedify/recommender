@@ -26,13 +26,22 @@ func knownLimitOOMKills(kills []OOMKill) []OOMKill {
 
 // memoryGrowthHold reuses the leak detector to decide whether a material memory
 // reduction, or a new finite memory limit, must wait. Only an ongoing (fresh, not OOM-terminated) episode of the
-// selected release with mature, well-covered growth holds. Inferred release
-// boundaries and previous-release fallback never hold. It does not gate on the
+// selected release with mature, well-covered growth holds. An inferred
+// boundary needs complete current inventory; previous-release fallback never
+// holds. It does not gate on the
 // advisory status or notice. With no explicit leak policy the defaults are
 // evaluated privately. The returned analysis is non-nil only when the detector ran.
 func memoryGrowthHold(in Input, c ContainerObservation, p Policy, resource ResourceAnalysis) (bool, *MemoryLeakAnalysis) {
-	if c.Identity.ReleaseStartInferred || resource.RolloutFallback != nil {
+	if resource.RolloutFallback != nil {
 		return false, nil
+	}
+	if c.Identity.ReleaseStartInferred {
+		inventory := resource.Evidence.Inventory
+		if c.Identity.ReleaseStartedAt <= 0 || !inventory.Available || inventory.Excluded != 0 ||
+			inventory.Eligible <= 0 || inventory.Observed != inventory.Eligible ||
+			stale(inventory.Timestamp, in, p.Evidence) {
+			return false, nil
+		}
 	}
 	leakPolicy := p.Memory.LeakDetection
 	if leakPolicy == nil {
@@ -48,6 +57,9 @@ func memoryGrowthHold(in Input, c ContainerObservation, p Policy, resource Resou
 	bucketSeconds := float64(leakPolicy.BucketDurationSeconds)
 	minimum := max(memorySafetyMinimumUsableBuckets, int(math.Ceil(float64(leakPolicy.MinimumHistorySeconds)/bucketSeconds)))
 	for _, e := range leak.Episodes {
+		if c.Identity.ReleaseStartInferred && e.PodUID == "" {
+			continue
+		}
 		usable := int(math.Round(e.UsableHistoryHours * 3600 / bucketSeconds))
 		if e.Status == MemoryLeakPotential && len(e.OOMKillIDs) == 0 && !stale(e.ObservedEnd, in, p.Evidence) && e.Coverage >= p.Evidence.MinimumCoverage && usable >= minimum {
 			return true, leak

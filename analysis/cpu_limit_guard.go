@@ -5,8 +5,10 @@
 package analysis
 
 import (
+	"cmp"
 	"fmt"
 	"math"
+	"slices"
 	"sort"
 )
 
@@ -71,7 +73,22 @@ func normalizeCPULimitReductionGuard(g CPULimitReductionGuardPolicy) (CPULimitRe
 // throttling cannot see uncapped demand, so neither substitutes for the other.
 func cpuLimitReductionHold(in Input, c ContainerObservation, obs ResourceObservation, headroom float64, g CPULimitReductionGuardPolicy, freshnessSeconds float64, candidate float64, trace *SettingTrace) []Reason {
 	var held []Reason
-	if demand, ok := recurringCPUDemand(in, c, obs, g.RecurringSamples); ok {
+	if g.RequireCompleteCoverage && c.Classification != nil {
+		// Counter history may show an intervening rollout during a usage gap.
+		// Use it only for the guard's segment; the sizing policy keeps its own.
+		throttling := c.Classification.Throttling
+		releaseEvidence := c
+		releaseEvidence.CPU.Series = slices.Concat(c.CPU.Series, throttling.Periods, throttling.ThrottledPeriods, throttling.Seconds)
+		c.Identity = selectReleaseSegment(in, releaseEvidence).Identity
+	}
+	var demand float64
+	var complete bool
+	if g.RequireCompleteCoverage {
+		demand, complete = strictRecurringCPUDemand(in, c, obs, g.RecurringSamples, freshnessSeconds)
+	} else {
+		demand, complete = recurringCPUDemand(in, c, obs, g.RecurringSamples)
+	}
+	if complete {
 		required := demand * headroom
 		if !finite(required) {
 			required = math.MaxFloat64
@@ -157,6 +174,53 @@ func recurringCPUDemand(in Input, c ContainerObservation, obs ResourceObservatio
 		}
 	}
 	return demand, found
+}
+
+// Strict demand needs recurring observations for every eligible Pod. A
+// recent sample can establish that a Pod is present without proving its demand.
+func strictRecurringCPUDemand(in Input, c ContainerObservation, obs ResourceObservation, count int, freshnessSeconds float64) (float64, bool) {
+	start := max(in.WindowStart, c.Identity.ReleaseStartedAt)
+	// Do not count observations from before the counter source proved that
+	// this container lifetime was running. In particular, old usage must not
+	// supply recurring samples for a replacement container in the same Pod.
+	starts := make(map[string]int64)
+	if c.Classification != nil && c.Classification.Throttling.SourceComplete {
+		throttling := c.Classification.Throttling
+		for _, series := range throttling.Periods {
+			if series.WorkloadUID != c.Target.WorkloadUID || series.Release != c.Target.Release ||
+				!cpuCounterSeriesCurrent(series, start, in, freshnessSeconds, throttling.CoverageAt) {
+				continue
+			}
+			var first int64
+			for _, sample := range series.Samples {
+				if sample.Timestamp >= start && sample.Timestamp <= in.EvaluationTime && (first == 0 || sample.Timestamp < first) {
+					first = sample.Timestamp
+				}
+			}
+			starts[series.PodUID] = max(starts[series.PodUID], first)
+		}
+	}
+	seen := make(map[string]bool)
+	var demand float64
+	for _, series := range obs.Series {
+		if series.WorkloadUID != c.Target.WorkloadUID || series.Release != c.Target.Release ||
+			!cpuGuardSeriesFresh(series, start, in, freshnessSeconds) {
+			continue
+		}
+		if series.PodUID == "" || seen[series.PodUID] {
+			return 0, false
+		}
+		values, err := NormalizeSamples(series, max(start, starts[series.PodUID]), in.EvaluationTime)
+		if err != nil || len(values) < count {
+			return 0, false
+		}
+		seen[series.PodUID] = true
+		slices.SortFunc(values, func(a, b Sample) int {
+			return cmp.Compare(a.Value, b.Value)
+		})
+		demand = max(demand, values[len(values)-count].Value)
+	}
+	return demand, len(seen) > 0 && len(seen) == c.Inventory.Eligible
 }
 
 type cpuQuotaPressureEvidence struct {
@@ -287,6 +351,20 @@ func cpuGuardFresh(ts int64, in Input, freshnessSeconds float64) bool {
 	return ts > 0 && ts <= in.EvaluationTime && float64(in.EvaluationTime-ts)/1000 <= freshnessSeconds
 }
 
+func cpuGuardSeriesFresh(series Series, start int64, in Input, freshnessSeconds float64) bool {
+	return slices.ContainsFunc(series.Samples, func(sample Sample) bool {
+		return sample.Timestamp >= start && cpuGuardFresh(sample.Timestamp, in, freshnessSeconds)
+	})
+}
+
+func cpuCounterSeriesCurrent(series Series, start int64, in Input, freshnessSeconds float64, coverageAt int64) bool {
+	if coverageAt == 0 {
+		return cpuGuardSeriesFresh(series, start, in, freshnessSeconds)
+	}
+	return coverageAt >= start && cpuGuardFresh(coverageAt, in, freshnessSeconds) &&
+		slices.ContainsFunc(series.Samples, func(sample Sample) bool { return sample.Timestamp == coverageAt })
+}
+
 // cpuThrottlingCoverage proves CFS coverage for every current eligible Pod.
 // The expected set is the fresh same-release CPU usage PodUIDs, trusted only
 // with the adapter's SourceComplete flag, a fresh complete inventory without
@@ -338,7 +416,8 @@ func cpuThrottlingCoverage(in Input, c ContainerObservation, obs ResourceObserva
 		byPod[f] = make(map[string]Series, len(expected))
 		podOf := map[string]string{}
 		for _, s := range rows {
-			if s.WorkloadUID != c.Target.WorkloadUID || s.Release != c.Target.Release {
+			if s.WorkloadUID != c.Target.WorkloadUID || s.Release != c.Target.Release ||
+				!cpuCounterSeriesCurrent(s, start, in, freshnessSeconds, throttling.CoverageAt) {
 				continue
 			}
 			if s.ID == "" || s.PodUID == "" {

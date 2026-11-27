@@ -361,7 +361,7 @@ func assertGrowthNotHeld(t *testing.T, in Input, p Policy) ResourceAnalysis {
 	return r
 }
 
-func TestMemorySafetyDoesNotHoldEarlySparseWarmupOrInferredGrowth(t *testing.T) {
+func TestMemorySafetyRequiresMatureVerifiedGrowth(t *testing.T) {
 	t.Run("early advisory finding", func(t *testing.T) {
 		r := assertGrowthNotHeld(t, growthInput(3, 512*mib, 1024*mib), advisoryLeakPolicy(DefaultPolicy()))
 		if r.MemoryLeak == nil || r.MemoryLeak.Status != MemoryLeakPotential {
@@ -388,11 +388,14 @@ func TestMemorySafetyDoesNotHoldEarlySparseWarmupOrInferredGrowth(t *testing.T) 
 		in.Containers[0].Memory.CurrentLimit.Value = 2048 * mib
 		assertGrowthNotHeld(t, in, DefaultPolicy())
 	})
-	t.Run("inferred release boundary", func(t *testing.T) {
+	t.Run("inferred release boundary with complete inventory", func(t *testing.T) {
 		in := growthInput(6, 512*mib, 1024*mib)
 		in.Containers[0].Identity.ReleaseStartedAt = 0
-		if r := assertGrowthNotHeld(t, in, DefaultPolicy()); !has(r.DataQuality, ReasonInferredReleaseStart) {
-			t.Fatalf("expected an inferred boundary: %+v", r.DataQuality)
+		policy := DefaultPolicy()
+		policy.Memory.SafetyGuards = true
+		r := run(t, in, policy).Results[0]
+		if !has(r.DataQuality, ReasonInferredReleaseStart) || !reasonsHave(r.Notices, ReasonMemoryBaselineGrowth) || len(r.Recommendations) > 0 {
+			t.Fatalf("mature attributed growth with an inferred boundary must hold: %+v", r)
 		}
 	})
 }
