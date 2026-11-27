@@ -123,8 +123,8 @@ and the values give the running container start time in Unix milliseconds. A zer
 start preserves Pod identity while leaving the runtime unknown. Historical usage
 can inform the aggregate. Only fresh members of this snapshot establish current
 coverage. Strict CPU-limit proof requires aligned counters at the current applied
-quota and runtime. The adapter bounds those counter series to the verified quota
-segment. New CPU limits require recurring demand to fit without requiring CFS
+quota and runtime. The adapter sets `cpuGuardStart` on full CFS series to bound proof to
+the verified quota segment while retaining historical classification evidence. New CPU limits require recurring demand to fit without requiring CFS
 counters from an uncapped container.
 
 With memory safety enabled, a shorter current rollout's observed peak floors a
@@ -132,6 +132,10 @@ historical estimate. An incomplete OOM collection holds memory reductions and
 new limits. A verified current Pod's earlier OOM can predate a collector's first
 observation. A recorded activation or intervening rollout still excludes old
 events.
+
+Saved patch reviews mark the four connected read-only checks as unperformed:
+Deployment target, revision, current resources, and freshness. Write permission,
+admission, and server-side dry run belong to the apply workflow.
 
 ## OOM observations
 
@@ -158,8 +162,8 @@ The adapter must establish the workload/release identity at the event time befor
 assigning it to this container. Use zero or omit `MemoryLimitBytes` when the
 event-time limit is unknown or unlimited; do not substitute today's limit.
 Repeated scrapes of one termination retain the same event ID and timestamp.
-Identical events are deduplicated; conflicting observations sharing an ID are
-rejected. All supplied observations are validated before filtering by time or
+Repeated observations of the same event merge a known and unknown limit.
+Conflicting identities, timestamps, or known limits are rejected. All supplied observations are validated before filtering by time or
 workload/release identity. Events are sorted deterministically and input is not mutated.
 
 Only events within the requested window and selected workload UID/release segment
@@ -405,7 +409,7 @@ A finding has `detected`, `not-detected`, `insufficient-data`, or `unavailable`
 status. An absent tag is not proof that the workload lacks that feature.
 
 Adapters may supply `ContainerObservation.Classification` with attributed Lease
-and endpoint observations, classification-only OOM kills, and raw CPU throttling
+and endpoint observations, attributed OOM kills, and raw CPU throttling
 counters. The analyzer performs no I/O. Lease/workload associations must come
 from verified ownership or unambiguous holder identity; merely sharing a
 namespace is insufficient. Endpoint observations must resolve the container.
@@ -422,8 +426,8 @@ latest supplied 24 hours, excludes five minutes of warmup, and requires at least
 30 minutes, 30 samples, and 70% coverage. A coefficient of variation of at least
 0.5 and P95−P5 spread of at least 50 millicores or 32 MiB earns the resource tag.
 Replicas and previous releases are never pooled. Memory-leak classification uses
-the existing leak detector and its defaults; classification-only OOM kills split
-leak episodes but do not participate in sizing.
+the existing leak detector and its defaults. Attributed OOM kills split leak
+episodes. With memory safety guards enabled, sizing also uses these events.
 
 Each evaluated variance series exposes `mean`, `standardDeviation`, and `variance`
 alongside `coefficientOfVariation` and `spread`. These are the time-weighted

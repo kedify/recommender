@@ -175,8 +175,7 @@ func strictRecurringCPUDemand(in Input, c ContainerObservation, obs ResourceObse
 	// this container lifetime was running. In particular, old usage must not
 	// supply recurring samples for a replacement container in the same Pod.
 	starts := make(map[string]int64)
-	runtimes := make(map[string]string)
-	if c.Classification != nil && c.Classification.Throttling.SourceComplete {
+	if c.Inventory.CurrentPods == nil && c.Classification != nil && c.Classification.Throttling.SourceComplete {
 		throttling := c.Classification.Throttling
 		for _, series := range throttling.Periods {
 			if series.CPUGuardAdvisoryOnly || series.WorkloadUID != c.Target.WorkloadUID || series.Release != c.Target.Release ||
@@ -190,7 +189,6 @@ func strictRecurringCPUDemand(in Input, c ContainerObservation, obs ResourceObse
 				}
 			}
 			starts[series.PodUID] = max(starts[series.PodUID], first)
-			runtimes[series.PodUID] = series.ID
 		}
 	}
 	seen := make(map[string]bool)
@@ -214,11 +212,6 @@ func strictRecurringCPUDemand(in Input, c ContainerObservation, obs ResourceObse
 			}
 		}
 		boundary := max(start, starts[series.PodUID], runtimeStart)
-		if runtimeStart > 0 && series.ID != "" && runtimes[series.PodUID] == series.ID {
-			// The usage stream itself verifies the runtime. Delayed collection
-			// of CFS counters cannot erase recurring demand from that lifetime.
-			boundary = max(start, runtimeStart)
-		}
 		values, err := NormalizeSamples(series, boundary, in.EvaluationTime)
 		if err != nil || len(values) < count {
 			return 0, false
@@ -277,7 +270,7 @@ func cpuQuotaPressure(in Input, c ContainerObservation, freshnessSeconds float64
 			}
 			since := start
 			if currentOnly {
-				since = max(since, c.Inventory.CurrentPods[s.PodUID])
+				since = max(since, c.Inventory.CurrentPods[s.PodUID], s.CPUGuardStart)
 			}
 			intervals, err := CounterIntervals(s, since, in.EvaluationTime)
 			if err != nil || len(intervals) == 0 {
@@ -471,7 +464,8 @@ func cpuThrottlingCoverage(in Input, c ContainerObservation, obs ResourceObserva
 		if !okP || !okT || !okS || p.ID != th.ID || p.ID != sec.ID || inv.CurrentPods != nil && runtimeStart <= 0 {
 			continue
 		}
-		span, ok := cpuCoverageSpan(p, th, sec, max(start, runtimeStart), in, freshnessSeconds, throttling.CoverageAt)
+		quotaStart := max(start, runtimeStart, p.CPUGuardStart, th.CPUGuardStart, sec.CPUGuardStart)
+		span, ok := cpuCoverageSpan(p, th, sec, quotaStart, in, freshnessSeconds, throttling.CoverageAt)
 		if !ok {
 			continue
 		}

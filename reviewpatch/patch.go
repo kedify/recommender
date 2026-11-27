@@ -88,6 +88,8 @@ type Review struct {
 	ResourceVersion string   `json:"resourceVersion,omitempty"`
 }
 
+// UnperformedChecks lists the four connected read-only validations for a saved
+// review. Applying a patch and checking admission or write access are separate.
 func UnperformedChecks() []Check {
 	return []Check{
 		{Name: "target", Status: Unperformed},

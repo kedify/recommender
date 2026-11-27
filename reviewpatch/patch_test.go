@@ -6,6 +6,7 @@ package reviewpatch
 
 import (
 	"encoding/json"
+	"slices"
 	"strings"
 	"testing"
 
@@ -187,5 +188,12 @@ func TestUnknownCPUSettingDoesNotDiscardMemoryPair(t *testing.T) {
 	cpu.Evidence.Identity.WorkloadUID = "another"
 	if _, err = Build("cluster", "", target, 1234, out, nil); err == nil {
 		t.Fatal("global identity mismatch allowed partial export")
+	}
+}
+
+func TestOfflineChecksMatchConnectedReview(t *testing.T) {
+	want := []Check{{Name: "target", Status: Unperformed}, {Name: "revision", Status: Unperformed}, {Name: "currentResources", Status: Unperformed}, {Name: "freshness", Status: Unperformed}}
+	if got := UnperformedChecks(); !slices.Equal(want, got) {
+		t.Fatalf("offline review checks = %+v, want %+v", got, want)
 	}
 }

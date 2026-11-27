@@ -122,6 +122,9 @@ type Series struct {
 	// CPUGuardAdvisoryOnly excludes a retired runtime from current CPU proof.
 	// Its samples still inform sizing, rollback boundaries, and throttling history.
 	CPUGuardAdvisoryOnly bool `json:"cpuGuardAdvisoryOnly,omitempty"`
+	// Earliest CFS sample at the verified current quota, in Unix milliseconds.
+	// Earlier samples still describe this runtime's throttling history.
+	CPUGuardStart int64 `json:"cpuGuardStart,omitempty"`
 }
 type Sample struct {
 	Timestamp int64   `json:"timestamp"`

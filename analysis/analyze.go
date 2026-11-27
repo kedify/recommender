@@ -159,6 +159,7 @@ func Analyze(in Input, p Policy) (Output, error) {
 		if i > 0 && targetKey(c.Target) == targetKey(containers[i-1].Target) {
 			return Output{}, fmt.Errorf("duplicate logical container target %q", targetKey(c.Target))
 		}
+		original := c
 		if p.Memory.SafetyGuards && c.Classification != nil {
 			// Once an adapter observes an identified OOM, sizing and classification
 			// use the same event. Event selection reconciles repeated snapshots.
@@ -182,6 +183,10 @@ func Analyze(in Input, p Policy) (Output, error) {
 			out.Results = append(out.Results, result)
 		}
 		if p.Classification != nil {
+			if !p.Memory.SafetyGuards {
+				// Legacy classification selects its own segment from its broader inputs.
+				c = original
+			}
 			finding, err := classifyWorkload(in, c, p)
 			if err != nil {
 				return Output{}, fmt.Errorf("%s classification: %w", c.Target.Name, err)
@@ -452,7 +457,7 @@ func analyzeResource(in Input, c ContainerObservation, r Resource, p Policy) (Re
 			}
 			continue
 		}
-		if s.suggested < memoryFloor && (s.suggested < s.current.Value || s.setting == SettingLimits && s.current.Unset) {
+		if s.suggested < memoryFloor && (s.suggested < s.current.Value || s.setting == SettingLimits && s.current.Value == 0) {
 			settingTrace.stop("retained", ReasonBounds)
 			boundsSuppressedAction = true
 			continue
@@ -488,7 +493,7 @@ func analyzeResource(in Input, c ContainerObservation, r Resource, p Policy) (Re
 		// An uncapped container does not need to establish CFS coverage.
 		// A held reduction keeps the current limit, which is above the suggested
 		// limit and therefore above any request recommended by this pass.
-		if r == ResourceCPU && s.setting == SettingLimits && p.CPU.LimitReductionGuard != nil && (s.suggested < s.current.Value || p.CPU.LimitReductionGuard.RequireCompleteCoverage && s.current.Unset) && isMaterial(s.current, s.suggested, bounds) {
+		if r == ResourceCPU && s.setting == SettingLimits && p.CPU.LimitReductionGuard != nil && (s.suggested < s.current.Value || p.CPU.LimitReductionGuard.RequireCompleteCoverage && s.current.Value == 0) && isMaterial(s.current, s.suggested, bounds) {
 			if held := cpuLimitReductionHold(in, c, obs, headroom, *p.CPU.LimitReductionGuard, float64(p.Evidence.FreshnessSeconds), s.suggested, settingTrace); len(held) > 0 {
 				settingTrace.stop("retained", held...)
 				for _, reason := range held {
@@ -781,6 +786,10 @@ func normalizeUsage(in Input, c ContainerObservation, obs ResourceObservation, r
 // selectReleaseSegment derives a conservative observed segment boundary when
 // the source has no activation event. Seeing B between two A runs excludes old A.
 func selectReleaseSegment(in Input, c ContainerObservation, reliability bool) ContainerObservation {
+	if c.Identity.RolloutBoundaryVerified && c.Identity.ReleaseStartedAt > 0 {
+		// Other releases can still be serving Pods after the verified activation.
+		return c
+	}
 	cutoff := in.WindowStart - 1
 	rows := [][]Series{c.CPU.Series, c.Memory.Series}
 	if reliability && c.Classification != nil {

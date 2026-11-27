@@ -38,6 +38,12 @@ func TestCurrentPeakFloorsPreviousReleaseSizing(t *testing.T) {
 	if r := run(t, in, capped).Results[0]; len(r.Recommendations) != 0 {
 		t.Fatalf("a policy maximum below current usage authorized a reduction: %+v", r)
 	}
+	request, limit := c.Memory.CurrentRequest, c.Memory.CurrentLimit
+	c.Memory.CurrentRequest.Value, c.Memory.CurrentLimit.Value = 64*mib, 0
+	if r := run(t, in, capped).Results[0]; len(r.Recommendations) != 1 || r.Recommendations[0].Setting != SettingRequests {
+		t.Fatalf("numeric zero introduced a cap below current usage: %+v", r)
+	}
+	c.Memory.CurrentRequest, c.Memory.CurrentLimit = request, limit
 	c.OOMKills = []OOMKill{oomKill("failed", epoch+60_000, 512*mib)}
 	r = run(t, in, p).Results[0]
 	if r.Recommendations[1].SuggestedValue != 768*mib {
@@ -177,14 +183,18 @@ func TestRecurringDemandOutlivesCounterCollectionAndProtectsNewCaps(t *testing.T
 	c.Classification = &ClassificationObservation{Throttling: CPUThrottlingObservation{SourceComplete: true, Periods: []Series{mk(100)}, ThrottledPeriods: []Series{mk(0)}, Seconds: []Series{mk(0)}}}
 	p := guardStrictPolicy()
 	p.CPU.HeadroomCoefficient, p.CPU.Percentile, p.CPU.LimitsToRequestsRatio = 1, 66, 5
-	for _, unset := range []bool{false, true} {
-		if unset {
-			c.CPU.CurrentLimit = Signal{Available: true, Unset: true, Timestamp: in.EvaluationTime}
+	// Source-specific usage and quota metric IDs both identify the same Pod
+	// with a verified runtime start. Their IDs need not match across metrics.
+	s.ID = "cpu-usage"
+	current := c.CPU.CurrentLimit
+	for _, limit := range []Signal{current, {Available: true, Timestamp: in.EvaluationTime}, {Available: true, Unset: true, Timestamp: in.EvaluationTime}} {
+		c.CPU.CurrentLimit = limit
+		if limit.Value == 0 {
 			c.Classification = nil
 		}
 		r := run(t, in, p).Results[1]
 		if _, ok := guardRecommendation(r, SettingLimits); ok || !slices.Contains(r.Notices, ReasonCPULimitBelowDemand) {
-			t.Fatalf("unset=%v: %+v", unset, r)
+			t.Fatalf("limit=%+v: %+v", limit, r)
 		}
 	}
 	setUsage(false)
@@ -250,5 +260,61 @@ func TestVerifiedCurrentQuotaIsIndependentOfRetiredAdvisoryPressure(t *testing.T
 	result = run(t, in, guardStrictPolicy()).Results[1]
 	if _, ok := guardRecommendation(result, SettingLimits); ok || !slices.Contains(result.Notices, ReasonCPULimitEvidenceIncomplete) {
 		t.Fatalf("unverified quota authorized a reduction: %+v", result)
+	}
+}
+
+func TestVerifiedRolloutBoundarySurvivesOverlappingCounters(t *testing.T) {
+	in := fixture(3600, 60)
+	c := &in.Containers[0]
+	c.Identity.ReleaseStartedAt = epoch + 5*60000
+	c.Identity.ReleaseStartInferred, c.Identity.RolloutBoundaryVerified = true, true
+	c.Inventory.CurrentPods = map[string]int64{"pod-1": epoch + 5*60000}
+	c.OOMKills = []OOMKill{oomKill("current", epoch+6*60000, 512*mib)}
+	c.Classification = &ClassificationObservation{Throttling: CPUThrottlingObservation{Periods: []Series{guardCounter("previous", "B", epoch+10*60000, []float64{0, 3})}}}
+	p := safetyPolicy(shortPolicy())
+	p.Classification = &ClassificationPolicy{}
+	o := run(t, in, p)
+	if r := o.Results[0]; r.OOMAdjustment == nil || r.OOMAdjustment.OOMRequestFloorBytes != 768*mib || len(finding(o.Classifications[0], FeatureOOMKilled).OOMKills) != 1 {
+		t.Fatalf("concurrent release erased a current OOM: %+v", r)
+	}
+}
+
+func TestLegacyClassificationCanPrecedeFirstUsage(t *testing.T) {
+	in := fixture(600, 60)
+	c := &in.Containers[0]
+	c.Identity.ReleaseStartedAt = 0
+	in.WindowStart -= 60000
+	c.Classification = &ClassificationObservation{OOMKills: []OOMKill{oomKill("cold", epoch-30000, 512*mib)}}
+	p := shortPolicy()
+	p.Classification = &ClassificationPolicy{}
+	o := run(t, in, p)
+	if len(finding(o.Classifications[0], FeatureOOMKilled).OOMKills) != 1 || len(o.Results[0].Evidence.OOMKills) != 0 {
+		t.Fatal("legacy classification lost its independently attributed early OOM")
+	}
+}
+
+func TestQuotaResizeRetainsWholeRuntimeClassification(t *testing.T) {
+	in := guardCoverageInput(make([]float64, 11))
+	c := &in.Containers[0]
+	c.Inventory.CurrentPods = map[string]int64{"pod-1": epoch}
+	cf := guardCFS(&in)
+	for i := range cf.ThrottledPeriods[0].Samples {
+		cf.ThrottledPeriods[0].Samples[i].Value = float64(min(i, 3))
+	}
+	p := guardStrictPolicy()
+	p.Classification = &ClassificationPolicy{}
+	for _, tc := range []struct {
+		minutes      int64
+		currentProof bool
+	}{{8, true}, {9, false}} {
+		for _, family := range [][]Series{cf.Seconds, cf.ThrottledPeriods, cf.Periods} {
+			family[0].CPUGuardStart = epoch + tc.minutes*60000
+		}
+		out := run(t, in, p)
+		_, issued := guardRecommendation(out.Results[1], SettingLimits)
+		f := finding(out.Classifications[0], FeatureCPUThrottled)
+		if issued != tc.currentProof || f.Status != ClassificationDetected || len(f.Throttling) != 1 || f.Throttling[0].ThrottledPeriods == nil || *f.Throttling[0].ThrottledPeriods != 3 {
+			t.Fatalf("resize at minute %d incorrectly changed advisory or proof: %+v %+v", tc.minutes, out.Results[1], f)
+		}
 	}
 }
